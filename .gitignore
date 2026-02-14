@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+env/
+
+# Secrets & credentials — NEVER commit these
+*.json
+!package.json
+credentials/
+secrets/
+token.pickle
+client_secret*.json
+oauth2_credentials.json
+*.pem
+*.key
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GCP
+.gcloudignore
+
+# Logs
+*.log
