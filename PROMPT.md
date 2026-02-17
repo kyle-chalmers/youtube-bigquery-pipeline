@@ -1,50 +1,47 @@
-# Objective
-
+<objective>
 Build a complete daily YouTube analytics pipeline that fetches metrics for all published videos (full-length and shorts) from the YouTube Data API v3 and YouTube Analytics API, stores daily snapshots in Google BigQuery, and runs automatically via Google Cloud Scheduler triggering a Cloud Function.
 
 This pipeline will provide historical trend data for Kyle's YouTube channel (KC Labs AI) — tracking how each video's views, likes, comments, watch time, traffic sources, and engagement metrics change over time. The daily snapshot approach enables trend analysis, growth tracking, and content performance comparison.
+</objective>
 
-## Context
-
-### Channel Details
-
+<context>
+<channel_details>
 - Channel ID: UCkRi29nXFxNBuPhjseoB6AQ
 - Uploads Playlist: UUkRi29nXFxNBuPhjseoB6AQ
 - 63 total videos (mix of full-length and shorts), growing over time
 - YOUTUBE_API_KEY is set in ~/.zshrc for the Data API v3 (source it if not in env)
 - The Analytics API requires OAuth2 (not just an API key) — this will need to be set up
+</channel_details>
 
-### GCP Details
-
+<gcp_details>
 - GCP Project: "My First Project" (use project ID from `gcloud config get-value project`)
 - BigQuery dataset: youtube_analytics
 - Region: us-central1
 - Cloud Function runtime: Python 3.11+
 - gcloud CLI is already installed and authenticated
+</gcp_details>
 
-### API Coverage
-
+<api_coverage>
 Two YouTube APIs are needed because they provide different data:
 
 **YouTube Data API v3** (API key auth):
-
 - Video metadata: title, publishedAt, duration, tags, categoryId
 - Public stats: viewCount, likeCount, commentCount, favoriteCount
 - Endpoint: videos?part=snippet,contentDetails,statistics
 
 **YouTube Analytics API** (OAuth2 auth):
-
 - Watch time metrics: estimatedMinutesWatched, averageViewDuration, averageViewPercentage
 - Engagement: likes, dislikes, comments, shares, subscribersGained, subscribersLost
 - Traffic sources: trafficSourceType, trafficSourceDetail
 - Impressions and CTR: impressions, impressionClickThroughRate
 - Audience retention data
 - Endpoint: youtube/analytics/v2/reports
+</api_coverage>
 
 This is a fresh repository. All code should be created at the repo root level.
+</context>
 
-## Research
-
+<research>
 Before writing any code, thoroughly investigate the current GCP setup and API requirements:
 
 1. Run `gcloud config get-value project` to confirm the project ID
@@ -54,15 +51,13 @@ Before writing any code, thoroughly investigate the current GCP setup and API re
 5. Check existing Cloud Scheduler jobs: `gcloud scheduler jobs list`
 6. Verify the YouTube API key works: `source ~/.zshrc && curl -s "https://www.googleapis.com/youtube/v3/channels?part=snippet&id=UCkRi29nXFxNBuPhjseoB6AQ&key=$YOUTUBE_API_KEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('items',[{}])[0].get('snippet',{}).get('title','ERROR'))"`
 7. Check if OAuth2 credentials exist for the Analytics API, or if they need to be created
+</research>
 
-## Requirements
-
-### BigQuery Schema
-
+<requirements>
+<bigquery_schema>
 Create these tables in the `youtube_analytics` dataset:
 
 **Table: video_metadata** (slowly changing dimension — updated daily)
-
 - video_id (STRING, primary identifier)
 - title (STRING)
 - published_at (TIMESTAMP)
@@ -75,7 +70,6 @@ Create these tables in the `youtube_analytics` dataset:
 - snapshot_date (DATE, partition key)
 
 **Table: daily_video_stats** (append-only daily snapshots from Data API)
-
 - snapshot_date (DATE, partition key)
 - video_id (STRING)
 - view_count (INTEGER)
@@ -84,7 +78,6 @@ Create these tables in the `youtube_analytics` dataset:
 - favorite_count (INTEGER)
 
 **Table: daily_video_analytics** (append-only daily snapshots from Analytics API)
-
 - snapshot_date (DATE, partition key)
 - video_id (STRING)
 - estimated_minutes_watched (FLOAT)
@@ -99,7 +92,6 @@ Create these tables in the `youtube_analytics` dataset:
 - card_click_rate (FLOAT)
 
 **Table: daily_traffic_sources** (append-only from Analytics API)
-
 - snapshot_date (DATE, partition key)
 - video_id (STRING)
 - traffic_source_type (STRING)
@@ -107,9 +99,9 @@ Create these tables in the `youtube_analytics` dataset:
 - estimated_minutes_watched (FLOAT)
 
 All tables should be partitioned by snapshot_date for cost-efficient querying.
+</bigquery_schema>
 
-### Cloud Function
-
+<cloud_function>
 Create a Python Cloud Function (2nd gen) that:
 
 1. Fetches ALL video IDs from the uploads playlist (handle pagination — channel has 63+ videos)
@@ -121,16 +113,15 @@ Create a Python Cloud Function (2nd gen) that:
 7. Returns a summary of what was processed (video count, rows inserted, any errors)
 
 **Important implementation details:**
-
 - Use `google-cloud-bigquery` library for BigQuery writes
 - Use `google-api-python-client` for YouTube APIs
 - Use `google-auth` for OAuth2 service account authentication
 - The function should be idempotent — running it twice on the same day should not create duplicates (use DELETE + INSERT or MERGE for the current snapshot_date)
 - Set function timeout to 540 seconds (9 minutes) since we're making many API calls
 - Set memory to 512MB
+</cloud_function>
 
-### OAuth2 Setup
-
+<oauth2_setup>
 The YouTube Analytics API requires OAuth2, not just an API key. Set up:
 
 1. Create OAuth2 credentials in Google Cloud Console (or via gcloud) for the YouTube Analytics API
@@ -141,23 +132,21 @@ The YouTube Analytics API requires OAuth2, not just an API key. Set up:
 4. The Cloud Function reads secrets at runtime from Secret Manager
 
 Document the one-time OAuth setup steps clearly so Kyle can complete the consent flow.
+</oauth2_setup>
 
-### Cloud Scheduler
-
+<cloud_scheduler>
 Set up Cloud Scheduler to trigger the Cloud Function:
-
 - Schedule: daily at 6:00 AM UTC (midnight CST, after YouTube's daily stats finalize)
 - HTTP trigger pointing to the Cloud Function URL
 - Include appropriate authentication (OIDC token)
 - Retry config: 3 retries with exponential backoff
+</cloud_scheduler>
+</requirements>
 
-## Implementation
-
+<implementation>
 Create all files at the repository root:
 
-### File Structure
-
-```text
+<file_structure>
 ./
 ├── README.md                        # Setup guide, architecture overview, one-time OAuth instructions
 ├── .gitignore                       # Python, GCP, secrets exclusions
@@ -176,10 +165,9 @@ Create all files at the repository root:
 └── sql/
     ├── create_tables.sql            # BigQuery DDL for all tables
     └── sample_queries.sql           # Useful analytical queries (trends, comparisons)
-```
+</file_structure>
 
-### Coding Standards
-
+<coding_standards>
 - Use type hints throughout Python code
 - Include docstrings for all functions
 - Use logging (not print) — Cloud Functions integrate with Cloud Logging
@@ -187,17 +175,18 @@ Create all files at the repository root:
 - Keep functions modular — each module handles one API or one destination
 - Use constants for channel ID, playlist ID, dataset name (configurable at top of main.py)
 - All shell scripts should be executable and include error handling (set -euo pipefail)
+</coding_standards>
 
-### Constraints
-
+<constraints>
 - YouTube Data API quota: 10,000 units/day. A videos.list call costs 1 unit per request (50 videos per request). Playlist items costs 1 unit. Total for ~60 videos: ~4 units. Well within quota.
 - YouTube Analytics API: Has its own quota, typically generous for channel owners querying their own data.
 - BigQuery: Free tier covers 1TB queries/month and 10GB storage — this pipeline will use a tiny fraction.
 - Cloud Function: Free tier covers 2M invocations/month — 1/day is nothing.
 - Cloud Scheduler: Free tier covers 3 jobs — 1 job is fine.
+</constraints>
+</implementation>
 
-## Verification
-
+<verification>
 Before declaring complete, verify:
 
 1. All shell scripts are syntactically valid: `bash -n setup/*.sh`
@@ -212,9 +201,9 @@ Before declaring complete, verify:
 5. All API endpoints and parameters are correct per current documentation
 6. Idempotency logic is sound (no duplicate rows on re-run)
 7. .gitignore properly excludes secrets, credentials, and Python artifacts
+</verification>
 
-### Success Criteria
-
+<success_criteria>
 - Complete, deployable Cloud Function code that fetches from both YouTube APIs
 - BigQuery table DDL with proper partitioning and schema
 - Numbered setup scripts that can be run sequentially to deploy everything
@@ -223,3 +212,4 @@ Before declaring complete, verify:
 - Sample BigQuery queries demonstrating how to analyze the collected data
 - README with clear architecture overview and setup instructions
 - .gitignore protecting secrets and build artifacts
+</success_criteria>
