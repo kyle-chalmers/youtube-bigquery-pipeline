@@ -78,37 +78,26 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 
 ## Prerequisites
 
-Before starting, you need the following installed and configured:
-
-| Tool                            | Purpose                                                      | Install                                                     |
-| ------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
-| **Google Cloud SDK (`gcloud`)** | GCP project management, API enabling, deployments            | [Install guide](https://cloud.google.com/sdk/docs/install)  |
-| **`bq` CLI**                    | BigQuery dataset/table management (included with gcloud SDK) | Included with gcloud                                        |
-| **Python 3.11+**                | Cloud Function runtime and local testing                     | [python.org](https://www.python.org/downloads/)             |
-| **`curl`**                      | API testing during development                               | Pre-installed on macOS/Linux                                |
+| Tool | Purpose | Install |
+|------|---------|---------|
+| **Google Cloud SDK (`gcloud`)** | GCP project management, deployments | [Install guide](https://cloud.google.com/sdk/docs/install) |
+| **`bq` CLI** | BigQuery management (included with gcloud) | Included with gcloud |
+| **Python 3.11+** | Cloud Function runtime | [python.org](https://www.python.org/downloads/) |
 
 ### GCP Authentication
 
 ```bash
-# Authenticate with your GCP account
 gcloud auth login
-
-# Set your project
 gcloud config set project <your-project-id>
-
-# Verify
 gcloud config get-value project
 ```
 
 ### Environment Variables
 
-Add these to your `~/.zshrc` (or `~/.bashrc`):
+Add to your `~/.zshrc` (or `~/.bashrc`):
 
 ```bash
-# YouTube API key (create one in GCP Console → APIs & Services → Credentials)
 export YOUTUBE_API_KEY="your-api-key-here"
-
-# YouTube Channel ID (find at youtube.com/account_advanced)
 export YOUTUBE_CHANNEL_ID="your-channel-id-here"
 ```
 
@@ -116,44 +105,238 @@ Then `source ~/.zshrc` to load them.
 
 ---
 
-## Build Log
+## Deployment (Step by Step)
 
-*This section documents the actual build process in order. It will be reorganized into a polished setup guide after the build is complete.*
+Run the setup scripts in order. Each script is idempotent (safe to re-run).
 
-### Step 0: Environment Verification
-
-**Date:** 2026-02-17
-
-Verified the starting environment before writing any code:
+### Step 1: Enable GCP APIs
 
 ```bash
-# Confirm GCP project
-gcloud config get-value project
-# → primeval-node-478707-e9
-
-# Check enabled APIs
-gcloud services list --enabled
-# → BigQuery, YouTube Data API v3, Cloud Storage, Logging already enabled
-# → NOT yet enabled: Cloud Functions, Cloud Scheduler, Secret Manager, YouTube Analytics API
-
-# Check for existing resources
-bq ls                          # → No datasets
-gcloud functions list          # → No functions
-gcloud scheduler jobs list     # → No scheduler jobs
+bash setup/1_enable_apis.sh
 ```
 
-**Issue found: API key mismatch.** The `YOUTUBE_API_KEY` in `~/.zshrc` was from a different GCP project and returned 403 errors. Discovered by comparing `gcloud services api-keys list` output against the env var. Updated `~/.zshrc` with the correct key from `primeval-node-478707-e9`.
+Enables: Cloud Functions, Cloud Scheduler, Secret Manager, YouTube Analytics API, Cloud Build, Cloud Run.
 
-**Channel verified working:**
+### Step 2: Create BigQuery Tables
+
+```bash
+bash setup/2_create_bigquery.sh
+```
+
+Creates the `youtube_analytics` dataset and 4 tables:
+
+| Table | Source | Type |
+|-------|--------|------|
+| `video_metadata` | Data API v3 | Slowly changing dimension (updated daily) |
+| `daily_video_stats` | Data API v3 | Append-only daily snapshots |
+| `daily_video_analytics` | Analytics API v2 | Append-only daily snapshots |
+| `daily_traffic_sources` | Analytics API v2 | Append-only daily snapshots |
+
+### Step 3: Set Up OAuth2 (One-Time)
+
+The YouTube Analytics API requires OAuth2 consent from the channel owner. This is a manual process:
+
+```bash
+bash setup/3_setup_oauth.sh
+```
+
+Follow the printed instructions to:
+1. Configure the OAuth consent screen in GCP Console
+2. Create OAuth credentials (Desktop app type)
+3. Run `python3 setup/oauth_helper.py` to complete the browser consent flow
+4. Store the refresh token, client ID, and client secret in Secret Manager
+
+**Note:** If your YouTube channel is on a different Google account than your GCP project, add that personal account as a test user in the consent screen, then sign in with it during the consent flow.
+
+### Step 4: Store API Key in Secret Manager
+
+```bash
+source ~/.zshrc
+printf '%s' "$YOUTUBE_API_KEY" > /tmp/secret.tmp
+gcloud secrets create youtube-data-api-key --data-file=/tmp/secret.tmp
+rm /tmp/secret.tmp
+```
+
+### Step 5: Deploy the Cloud Function
+
+```bash
+bash setup/4_deploy_function.sh
+```
+
+Deploys a 2nd gen Cloud Function (Python 3.11, 512MB memory, 9-minute timeout).
+
+**IAM permissions needed** (grant these if deployment fails):
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format='value(projectNumber)')
+
+# Cloud Build permissions
+gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/cloudbuild.builds.builder"
+
+# Secret Manager access
+gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+
+# BigQuery access
+gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/bigquery.dataEditor"
+
+gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/bigquery.jobUser"
+```
+
+### Step 6: Create Cloud Scheduler Job
+
+```bash
+bash setup/5_create_scheduler.sh
+```
+
+Creates a daily trigger at 6:00 AM UTC (midnight CST) with 3 retries and exponential backoff.
+
+---
+
+## Manual Testing
+
+Trigger the function manually:
+
+```bash
+FUNCTION_URL=$(gcloud functions describe youtube-bigquery-pipeline \
+    --region=us-central1 --gen2 --format='value(serviceConfig.uri)')
+
+curl -s -H "Authorization: bearer $(gcloud auth print-identity-token)" \
+    "$FUNCTION_URL" | python3 -m json.tool
+```
+
+Expected response:
+
+```json
+{
+    "snapshot_date": "2026-02-17",
+    "videos_processed": 63,
+    "shorts": 51,
+    "full_length": 12,
+    "rows_inserted": {
+        "video_metadata": 63,
+        "daily_video_stats": 63,
+        "daily_video_analytics": 0,
+        "daily_traffic_sources": 0
+    },
+    "analytics_errors": []
+}
+```
+
+Analytics tables show 0 until OAuth2 is configured (Step 3).
+
+---
+
+## Querying the Data
+
+See `sql/sample_queries.sql` for a full set of analytical queries. Here are a few examples:
+
+### Top videos by views
+
+```sql
+SELECT m.title, m.video_type, s.view_count, s.like_count
+FROM `youtube_analytics.video_metadata` m
+JOIN `youtube_analytics.daily_video_stats` s USING (video_id, snapshot_date)
+WHERE m.snapshot_date = (SELECT MAX(snapshot_date) FROM `youtube_analytics.video_metadata`)
+ORDER BY s.view_count DESC
+LIMIT 10;
+```
+
+### Shorts vs full-length comparison
+
+```sql
+SELECT m.video_type, COUNT(*) AS videos,
+    ROUND(AVG(s.view_count)) AS avg_views,
+    ROUND(AVG(s.like_count)) AS avg_likes
+FROM `youtube_analytics.video_metadata` m
+JOIN `youtube_analytics.daily_video_stats` s USING (video_id, snapshot_date)
+WHERE m.snapshot_date = (SELECT MAX(snapshot_date) FROM `youtube_analytics.video_metadata`)
+GROUP BY m.video_type;
+```
+
+### Week-over-week channel growth
+
+```sql
+SELECT snapshot_date, SUM(view_count) AS total_views,
+    SUM(view_count) - LAG(SUM(view_count)) OVER (ORDER BY snapshot_date) AS daily_delta
+FROM `youtube_analytics.daily_video_stats`
+GROUP BY snapshot_date
+ORDER BY snapshot_date DESC LIMIT 14;
+```
+
+---
+
+## Cost
+
+Everything runs within GCP free tier:
+
+| Service | Free Tier | Our Usage |
+|---------|-----------|-----------|
+| Cloud Functions | 2M invocations/month | ~30 (1/day) |
+| Cloud Scheduler | 3 jobs | 1 job |
+| BigQuery | 10GB storage, 1TB queries | Tiny |
+| YouTube Data API | 10,000 units/day | ~4 units |
+| Secret Manager | 10,000 access ops/month | ~4/day |
+
+---
+
+## Project Structure
 
 ```text
-Channel: Kyle Chalmers | Data + AI
-Handle:  @kylechalmersdataai
-Videos:  63
-Subs:    278
-Views:   30,565
+cloud_function/
+  main.py                      # Cloud Function entry point
+  requirements.txt             # Python dependencies
+  youtube_data_api.py          # YouTube Data API v3 client
+  youtube_analytics_api.py     # YouTube Analytics API v2 client
+  bigquery_writer.py           # BigQuery write operations
+setup/
+  1_enable_apis.sh             # Enable GCP APIs
+  2_create_bigquery.sh         # Create BigQuery dataset + tables
+  3_setup_oauth.sh             # OAuth2 setup guide
+  4_deploy_function.sh         # Deploy Cloud Function
+  5_create_scheduler.sh        # Create Cloud Scheduler job
+  oauth_helper.py              # One-time OAuth consent flow
+sql/
+  create_tables.sql            # BigQuery DDL (4 tables)
+  sample_queries.sql           # Analytical queries
 ```
 
-### Step 1: Enable APIs & Create Infrastructure
+---
 
-*Next up...*
+## Build Log
+
+### Step 0: Environment Verification (2026-02-17)
+
+Verified GCP project `primeval-node-478707-e9`. Found BigQuery and YouTube Data API already enabled. Fixed an API key mismatch (key was from a wrong project). Channel confirmed: 63 videos, 278 subscribers, 30,565 views.
+
+### Step 1: Infrastructure Setup
+
+Enabled Cloud Functions, Scheduler, Secret Manager, YouTube Analytics API, Cloud Build, and Cloud Run APIs. Created `youtube_analytics` dataset with 4 partitioned tables.
+
+### Step 2: Cloud Function Development
+
+Built modular Python Cloud Function with:
+- `youtube_data_api.py`: Playlist pagination, batch video detail fetching (50/request), ISO 8601 duration parsing, shorts classification
+- `bigquery_writer.py`: Idempotent DELETE + batch load pattern (avoids streaming buffer consistency issues)
+- `main.py`: Orchestration with graceful Analytics API fallback
+
+### Step 3: First Deployment
+
+Deployed 2nd gen Cloud Function. Resolved IAM permission gaps: Cloud Build builder role, Secret Manager accessor, BigQuery data editor + job user. Stored API key in Secret Manager.
+
+**First successful trigger:** 63 videos processed (12 full-length, 51 shorts), `video_metadata` and `daily_video_stats` populated.
+
+### Step 4: Analytics API + OAuth2
+
+Created OAuth2 setup guide, consent flow helper script, and Analytics API client module with exponential backoff. Analytics tables will populate after OAuth2 consent flow is completed.
+
+### Step 5: Cloud Scheduler
+
+Created daily trigger at 6:00 AM UTC with OIDC authentication and 3 retries. First automated run: 2026-02-18.
