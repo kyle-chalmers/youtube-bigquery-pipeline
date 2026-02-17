@@ -29,16 +29,19 @@ IMPORTANT: Everything in this repo is public-facing, so do not place any sensiti
 These API calls have been tested and confirmed working in this environment:
 
 **Fetch channel info:**
+
 ```bash
 curl -s "https://www.googleapis.com/youtube/v3/channels?part=snippet&id=UCkRi29nXFxNBuPhjseoB6AQ&key=$YOUTUBE_API_KEY"
 ```
 
 **Fetch video details (snippet + contentDetails + statistics):**
+
 ```bash
 curl -s "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id={comma-separated-ids}&key=$YOUTUBE_API_KEY"
 ```
 
 **Key API facts discovered:**
+
 - `publishedAt` is in `snippet` (not `contentDetails`)
 - Duration is ISO 8601 format in `contentDetails.duration` (e.g., `PT12M34S`)
 - Pagination uses `nextPageToken` — max 50 results per request
@@ -57,6 +60,7 @@ The video follows this section structure. The build should naturally align with 
 7. **The payoff** — trigger manually, show data in BigQuery
 
 **Build tips for video quality:**
+
 - Write clear commit messages that tell a story
 - Build incrementally — get the Data API working first, then add Analytics API
 - When errors occur, show the debugging process (this is valuable content)
@@ -74,6 +78,7 @@ The video follows this section structure. The build should naturally align with 
 ## Cost Expectations
 
 Everything runs within GCP free tier:
+
 - Cloud Functions: 2M free invocations/month (we use 1/day = 30)
 - Cloud Scheduler: 3 free jobs (we use 1)
 - BigQuery: 10GB storage + 1TB queries free (our data is tiny)
@@ -97,6 +102,7 @@ Claude Code is building this project with the following access:
 **As we build, continuously update README.md with the actual steps taken, commands run, and issues encountered.** After the build is complete, we'll organize the README into a polished guide. For now, document everything in the order it happens — this serves as both a build log and the foundation for the final README.
 
 Include:
+
 - Each setup/deployment step with the exact commands used
 - Any errors hit and how they were resolved (great video content)
 - Environment prerequisites and authentication steps
