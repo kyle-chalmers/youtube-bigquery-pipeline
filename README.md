@@ -8,7 +8,7 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 
 ## Architecture
 
-```
+```text
                             ┌──────────────────────────────────┐
                             │       Google Cloud Scheduler      │
                             │      (Daily @ 6:00 AM UTC)        │
@@ -65,6 +65,7 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 ```
 
 **Data flow summary:**
+
 - **Cloud Scheduler** triggers the Cloud Function once daily
 - **Cloud Function** calls both YouTube APIs, then writes to 4 BigQuery tables
 - **Data API** (API key) provides video metadata and public stats
@@ -79,12 +80,12 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 
 Before starting, you need the following installed and configured:
 
-| Tool | Purpose | Install |
-|------|---------|---------|
-| **Google Cloud SDK (`gcloud`)** | GCP project management, API enabling, deployments | [Install guide](https://cloud.google.com/sdk/docs/install) |
-| **`bq` CLI** | BigQuery dataset/table management (included with gcloud SDK) | Included with gcloud |
-| **Python 3.11+** | Cloud Function runtime and local testing | [python.org](https://www.python.org/downloads/) |
-| **`curl`** | API testing during development | Pre-installed on macOS/Linux |
+| Tool                            | Purpose                                                      | Install                                                     |
+| ------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
+| **Google Cloud SDK (`gcloud`)** | GCP project management, API enabling, deployments            | [Install guide](https://cloud.google.com/sdk/docs/install)  |
+| **`bq` CLI**                    | BigQuery dataset/table management (included with gcloud SDK) | Included with gcloud                                        |
+| **Python 3.11+**                | Cloud Function runtime and local testing                     | [python.org](https://www.python.org/downloads/)             |
+| **`curl`**                      | API testing during development                               | Pre-installed on macOS/Linux                                |
 
 ### GCP Authentication
 
@@ -144,7 +145,8 @@ gcloud scheduler jobs list     # → No scheduler jobs
 **Issue found: API key mismatch.** The `YOUTUBE_API_KEY` in `~/.zshrc` was from a different GCP project and returned 403 errors. Discovered by comparing `gcloud services api-keys list` output against the env var. Updated `~/.zshrc` with the correct key from `primeval-node-478707-e9`.
 
 **Channel verified working:**
-```
+
+```text
 Channel: Kyle Chalmers | Data + AI
 Handle:  @kylechalmersdataai
 Videos:  63
