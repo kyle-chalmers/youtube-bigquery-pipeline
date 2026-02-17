@@ -8,7 +8,7 @@ This pipeline will provide historical trend data for Kyle's YouTube channel (KC 
 <channel_details>
 - Channel ID: UCkRi29nXFxNBuPhjseoB6AQ
 - Uploads Playlist: UUkRi29nXFxNBuPhjseoB6AQ
-- Mix of full-length videos (12+) and shorts (46+), growing over time
+- 63 total videos (mix of full-length and shorts), growing over time
 - YOUTUBE_API_KEY is set in ~/.zshrc for the Data API v3 (source it if not in env)
 - The Analytics API requires OAuth2 (not just an API key) — this will need to be set up
 </channel_details>
@@ -104,7 +104,7 @@ All tables should be partitioned by snapshot_date for cost-efficient querying.
 <cloud_function>
 Create a Python Cloud Function (2nd gen) that:
 
-1. Fetches ALL video IDs from the uploads playlist (handle pagination — channel has 58+ videos)
+1. Fetches ALL video IDs from the uploads playlist (handle pagination — channel has 63+ videos)
 2. Calls the Data API `videos` endpoint with `snippet,contentDetails,statistics` parts (batch up to 50 IDs per request)
 3. Calls the Analytics API for each video's daily metrics (for the previous day, since Analytics API data is delayed ~2 days, use a 3-day lookback window and upsert)
 4. Calls the Analytics API for traffic source breakdown per video
