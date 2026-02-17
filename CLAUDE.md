@@ -4,7 +4,7 @@
 
 Daily automated pipeline that snapshots YouTube analytics for the KC Labs AI channel into BigQuery. This enables historical trend analysis, content performance comparison, and growth tracking that YouTube Studio doesn't natively support.
 
-IMPORTANT: Everything in this repo is public-facing, so do not place any sensitive info here and make sure to distinguish between what should be internal-facing info (e.g. secrets, PII, recording guides/scripts), and public-facing info (instructions, how-to guides, actual code utilized). If there is information that you need to know within the repo that should not be published, put it in the .internal folder which should be ignored by git per the .gitignore.
+IMPORTANT: Everything in this repo is public-facing, so do not place any sensitive info here and make sure to distinguish between what should be internal-facing info (e.g. secrets, PII, recording guides/scripts), and public-facing info (instructions, how-to guides, actual code utilized). If there is information that Claude Code needs across sessions but should not be published, put it in the `.internal/` folder which is ignored by git per the `.gitignore`.
 
 **This build is being recorded as a YouTube video.** Keep the build process clean, demonstrable, and well-narrated through commit messages and README documentation. The video title is "I Let Claude Code Build My Entire YouTube Analytics Pipeline."
 
