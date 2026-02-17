@@ -43,3 +43,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Internal notes (not for public repo)
+.internal/
