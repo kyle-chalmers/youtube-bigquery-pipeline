@@ -27,13 +27,13 @@ echo "Service account: $SERVICE_ACCOUNT"
 
 echo ""
 echo "Creating Cloud Scheduler job: $JOB_NAME"
-echo "  Schedule: 0 6 * * * (daily at 6:00 AM UTC / midnight CST)"
+echo "  Schedule: 50 6 * * * (daily at 6:50 AM UTC / 11:50 PM MST)"
 echo "  Retries:  3 with exponential backoff (30s–300s)"
 echo ""
 
 gcloud scheduler jobs create http "$JOB_NAME" \
     --location="$REGION" \
-    --schedule="0 6 * * *" \
+    --schedule="50 6 * * *" \
     --uri="$FUNCTION_URL" \
     --http-method=POST \
     --oidc-service-account-email="$SERVICE_ACCOUNT" \

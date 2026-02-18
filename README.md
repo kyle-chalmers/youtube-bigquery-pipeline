@@ -103,13 +103,33 @@ A third API exists — the **YouTube Reporting API (v1)** — which provides the
 | **`bq` CLI** | BigQuery management (included with gcloud) | Included with gcloud |
 | **Python 3.11+** | Cloud Function runtime | [python.org](https://www.python.org/downloads/) |
 
+### Install Google Cloud CLI
+
+If you're using Claude Code, paste this prompt:
+
+> Install the Google Cloud CLI (`gcloud`) on my machine. Detect my OS and architecture, download the correct package, run the installer, and walk me through `gcloud init` to authenticate and select my project.
+
+Or install manually via the [official guide](https://cloud.google.com/sdk/docs/install-sdk). The `bq` CLI is included with gcloud — no separate install needed.
+
+### Definitions
+
+| Term | What it means |
+|------|---------------|
+| **BigQuery** | Google's serverless data warehouse — think of it as a massive SQL database in the cloud where you only pay for what you query |
+| **Cloud Function** | A small piece of code that runs in the cloud without you managing a server — you upload it, Google runs it when triggered |
+| **Cloud Scheduler** | Google's version of a cron job — it triggers your Cloud Function on a schedule (daily, hourly, whatever) |
+| **OAuth2** | An authentication method that lets your code access YouTube data on your behalf — more secure than just an API key, but more complex to set up |
+| **API** | Application Programming Interface — the way your code talks to YouTube and BigQuery to send and receive data |
+
 ### GCP Authentication
+
+The only manual step is logging in — this opens a browser window where you sign in with your Google account:
 
 ```bash
 gcloud auth login
-gcloud config set project <your-project-id>
-gcloud config get-value project
 ```
+
+From there, Claude Code handled the rest (setting the project, enabling APIs, granting IAM roles, etc.) while I reviewed its output. If you're following along, you can do the same — just authenticate and let Claude Code take it from there.
 
 ### Environment Variables
 
