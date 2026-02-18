@@ -11,7 +11,7 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 ```text
                             ┌──────────────────────────────────┐
                             │       Google Cloud Scheduler      │
-                            │      (Daily @ 6:00 AM UTC)        │
+                            │  (Daily @ 11:50 PM Phoenix time)  │
                             └────────────────┬─────────────────┘
                                              │ HTTP trigger
                                              ▼
@@ -276,7 +276,7 @@ gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
 bash setup/5_create_scheduler.sh
 ```
 
-Creates a daily trigger at 6:00 AM UTC (midnight CST) with 3 retries and exponential backoff.
+Creates a daily trigger at 11:50 PM Phoenix time (`America/Phoenix` timezone — no DST surprises) with 3 retries and exponential backoff.
 
 ---
 
@@ -314,9 +314,34 @@ Analytics tables show 0 until OAuth2 is configured (Step 3).
 
 ---
 
+## Historical Backfill
+
+The Analytics API supports historical date ranges, so we backfilled data from the channel's first public video (October 16, 2025) to the present. This gives ~125 days of historical watch time, subscriber impact, and traffic source data.
+
+```bash
+python3 setup/backfill_analytics.py --start 2025-10-16 --end 2026-02-17
+```
+
+**What gets backfilled:**
+- `daily_video_analytics` — watch time, retention, subscriber gains/losses, shares per video per day
+- `daily_traffic_sources` — traffic source breakdown per video per day
+
+**What doesn't get backfilled:**
+- `video_metadata` and `daily_video_stats` (Data API) — these only return current cumulative totals, not historical snapshots. They start accumulating from the first pipeline run forward.
+
+**Note:** The backfill makes ~64 API calls per day (1 video analytics call + 1 traffic source call per video). For 125 days, that's ~8,000 calls total. Expect it to take 45–60 minutes. Occasional YouTube API 500 errors on individual calls are normal — the script logs them and continues.
+
+After backfilling, run the verification queries to confirm coverage:
+
+```bash
+bq query --use_legacy_sql=false < sql/verification_queries.sql
+```
+
+---
+
 ## Querying the Data
 
-See `sql/sample_queries.sql` for a full set of analytical queries. Here are a few examples:
+See `sql/sample_queries.sql` for a full set of analytical queries and `sql/verification_queries.sql` for data integrity checks. Here are a few examples:
 
 ### Top videos by views
 
@@ -383,10 +408,48 @@ setup/
   4_deploy_function.sh         # Deploy Cloud Function
   5_create_scheduler.sh        # Create Cloud Scheduler job
   oauth_helper.py              # One-time OAuth consent flow
+  backfill_analytics.py        # Backfill historical Analytics API data
 sql/
   create_tables.sql            # BigQuery DDL (4 tables)
   sample_queries.sql           # Analytical queries
+  verification_queries.sql     # Data integrity and backfill verification
 ```
+
+---
+
+## Future Enhancements
+
+Additional fields available from the YouTube APIs that we're not currently capturing:
+
+**YouTube Data API v3 (additional metadata):**
+
+| Field | Description |
+|-------|-------------|
+| `description` | Full video description text |
+| `defaultLanguage` / `defaultAudioLanguage` | Video language settings |
+| `liveBroadcastContent` | Whether the video was a livestream |
+| `topicCategories` | Wikipedia URLs classifying the video topic (e.g., "Technology") |
+| `definition` | HD vs SD |
+| `caption` | Whether closed captions are available |
+
+**YouTube Analytics API v2 (additional metrics):**
+
+| Field | Description |
+|-------|-------------|
+| `annotationCloseRate` | Annotation dismissal rate |
+| `cardImpressions` / `cardClicks` | Info card engagement |
+| `audienceWatchRatio` | Audience retention curve data |
+| `likes` / `dislikes` | API-level counts (separate from Data API) |
+
+**YouTube Analytics API v2 (new dimensions — would need new tables):**
+
+| Dimension | Description |
+|-----------|-------------|
+| `ageGroup` / `gender` | Viewer demographics (requires additional OAuth scope) |
+| `country` / `province` | Geographic breakdown of views |
+| `insightPlaybackLocationType` | Watch page vs embedded vs mobile app |
+
+The geography and demographics data would be the most valuable for channel growth analysis — identifying which countries and age groups are watching. These would require new BigQuery tables since they represent different analytical dimensions.
 
 ---
 
@@ -419,4 +482,12 @@ Created OAuth2 setup guide, consent flow helper script, and Analytics API client
 
 ### Step 5: Cloud Scheduler
 
-Created daily trigger at 6:00 AM UTC with OIDC authentication and 3 retries. First automated run: 2026-02-18.
+Created daily trigger at 11:50 PM Phoenix time (`America/Phoenix` — no DST) with OIDC authentication and 3 retries.
+
+### Step 6: OAuth2 + Analytics API
+
+Completed OAuth2 consent flow for the YouTube Analytics API. Configured consent screen, created Desktop app credentials, ran the browser-based authorization flow, and stored the refresh token + client credentials in Secret Manager. Analytics tables now populate with watch time, retention, subscriber impact, and traffic source data.
+
+### Step 7: Historical Backfill
+
+Backfilled Analytics API data from the channel's first video (October 16, 2025) through February 17, 2026 — 125 days of historical data. This populated `daily_video_analytics` and `daily_traffic_sources` with per-day metrics that the daily pipeline wouldn't have captured retroactively. Added verification queries (`sql/verification_queries.sql`) to confirm backfill coverage and spot gaps.
