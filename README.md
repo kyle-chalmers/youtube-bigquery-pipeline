@@ -2,7 +2,7 @@
 
 Daily automated pipeline that snapshots YouTube analytics into BigQuery for historical trend analysis. Built for the [KC Labs AI](https://www.youtube.com/@kylechalmersdataai) channel.
 
-> This project was built live as a YouTube video: **"I Let Claude Code Build My Entire YouTube Analytics Pipeline."** The build prompt (`PROMPT.md`) was created using the [`/taches-cc-resources:create-prompt`](https://github.com/taches-ai/taches-cc-resources) Claude Code skill.
+> This project was built live as a YouTube video: **"I Let Claude Code Build My Entire YouTube Analytics Pipeline."** The build prompt (`PROMPT.md`) was created using the [`/taches-cc-resources:create-prompt`](https://github.com/glittercowboy/taches-cc-resources) Claude Code skill. Claude Code then generated a [6-phase implementation plan](prompts/completed/001-youtube-bigquery-pipeline-plan.md) from that prompt.
 
 ---
 
@@ -68,12 +68,12 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 
 **Data flow summary:**
 
-- **Cloud Scheduler** triggers the Cloud Function once daily
-- **Cloud Function** calls both YouTube APIs, then writes to 4 BigQuery tables
-- **Data API** (API key) provides video metadata and public stats
-- **Analytics API** (OAuth2) provides watch time, impressions, traffic sources
-- **Secret Manager** stores OAuth2 credentials so no secrets live in code
-- **BigQuery** stores daily snapshots partitioned by date for efficient querying
+- **[Cloud Scheduler](https://cloud.google.com/scheduler)** triggers the Cloud Function once daily
+- **[Cloud Function](https://cloud.google.com/functions)** calls both YouTube APIs, then writes to 4 BigQuery tables
+- **[Data API](https://developers.google.com/youtube/v3)** (API key) provides video metadata and public stats
+- **[Analytics API](https://developers.google.com/youtube/analytics)** (OAuth2) provides watch time, impressions, traffic sources
+- **[Secret Manager](https://cloud.google.com/secret-manager)** stores OAuth2 credentials so no secrets live in code
+- **[BigQuery](https://cloud.google.com/bigquery)** stores daily snapshots partitioned by date for efficient querying
 - Everything runs within GCP free tier
 
 ---
@@ -82,7 +82,7 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 
 YouTube has two separate APIs that give you different data:
 
-| | Data API v3 | Analytics API v2 |
+| | [Data API v3](https://developers.google.com/youtube/v3) | [Analytics API v2](https://developers.google.com/youtube/analytics) |
 |--|-------------|-------------------|
 | **What it gives you** | Public stats: views, likes, comments, video metadata | Private creator data: watch time, avg view duration, traffic sources, impressions, CTR, subscriber gains/losses |
 | **Authentication** | API key (simple) | OAuth2 (must prove channel ownership) |
@@ -475,6 +475,10 @@ sql/
   create_tables.sql            # BigQuery DDL (4 tables)
   sample_queries.sql           # Analytical queries
   verification_queries.sql     # Data integrity and backfill verification
+prompts/
+  completed/
+    001-youtube-bigquery-pipeline-plan.md   # Claude Code's 6-phase implementation plan
+    001-add-structured-cloud-logging.md     # Structured logging upgrade prompt
 ```
 
 ---
