@@ -6,12 +6,27 @@ Triggered by Cloud Scheduler via HTTP.
 
 import logging
 import os
+import uuid
 from datetime import date, timedelta
 
 import functions_framework
 
 from bigquery_writer import BigQueryWriter
 from youtube_data_api import YouTubeDataAPI
+
+# ─── Structured Logging Setup ────────────────────────────────────
+# In Cloud Functions 2nd gen (Cloud Run), google-cloud-logging redirects
+# Python's logging module to Cloud Logging as structured JSON.
+# Falls back to basic stderr logging for local development.
+try:
+    import google.cloud.logging
+
+    cloud_logging_client = google.cloud.logging.Client()
+    cloud_logging_client.setup_logging()
+except ImportError:
+    logging.basicConfig(level=logging.INFO)
+except Exception:
+    logging.basicConfig(level=logging.INFO)
 
 # ─── Configuration ───────────────────────────────────────────────
 PROJECT_ID = os.environ.get("GCP_PROJECT", "primeval-node-478707-e9")
@@ -22,7 +37,6 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 ANALYTICS_LOOKBACK_DAYS = int(os.environ.get("ANALYTICS_LOOKBACK_DAYS", "3"))
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 @functions_framework.http
@@ -32,27 +46,40 @@ def main(request) -> tuple[dict, int]:
     Returns:
         Tuple of (response_dict, status_code).
     """
+    run_id = str(uuid.uuid4())[:8]
+    log = logging.LoggerAdapter(logger, extra={"run_id": run_id})
+
     try:
         if not YOUTUBE_API_KEY:
+            log.error("YOUTUBE_API_KEY not set")
             return {"error": "YOUTUBE_API_KEY not set"}, 500
 
         snapshot_date = date.today()
-        logger.info(f"Starting pipeline run for snapshot_date={snapshot_date}")
+        log.info(f"Pipeline started — snapshot_date={snapshot_date}, run_id={run_id}")
 
-        result = run_pipeline(snapshot_date)
-        logger.info(f"Pipeline complete: {result}")
+        result = run_pipeline(snapshot_date, log)
+        log.info(
+            f"Pipeline complete — videos={result['videos_processed']}, "
+            f"shorts={result['shorts']}, full_length={result['full_length']}, "
+            f"rows={{metadata={result['rows_inserted']['video_metadata']}, "
+            f"stats={result['rows_inserted']['daily_video_stats']}, "
+            f"analytics={result['rows_inserted']['daily_video_analytics']}, "
+            f"traffic={result['rows_inserted']['daily_traffic_sources']}}}, "
+            f"analytics_errors={len(result['analytics_errors'])}"
+        )
         return result, 200
 
     except Exception as e:
-        logger.exception(f"Pipeline failed: {e}")
+        log.exception(f"Pipeline failed — {e}")
         return {"error": str(e)}, 500
 
 
-def run_pipeline(snapshot_date: date) -> dict:
+def run_pipeline(snapshot_date: date, log: logging.LoggerAdapter) -> dict:
     """Execute the full pipeline for a given snapshot date.
 
     Args:
         snapshot_date: The date to use as the partition key in BigQuery.
+        log: LoggerAdapter with run_id for correlated logging.
 
     Returns:
         Summary dict with counts and any errors.
@@ -66,17 +93,19 @@ def run_pipeline(snapshot_date: date) -> dict:
 
     # Step 1: Fetch all video IDs
     video_ids = data_api.get_all_video_ids()
-    logger.info(f"Found {len(video_ids)} videos")
+    log.info(f"Fetched {len(video_ids)} video IDs from uploads playlist")
 
     # Step 2: Fetch video details (metadata + public stats)
     video_details = data_api.get_video_details(video_ids)
-    logger.info(f"Fetched details for {len(video_details)} videos")
+    log.info(f"Fetched details for {len(video_details)} videos")
 
     # Step 3: Write to BigQuery — Data API tables
     metadata_count = bq_writer.write_video_metadata(video_details, snapshot_date)
+    log.info(f"Wrote video_metadata — {metadata_count} rows")
     stats_count = bq_writer.write_daily_video_stats(video_details, snapshot_date)
+    log.info(f"Wrote daily_video_stats — {stats_count} rows")
 
-    # Step 4: Analytics API (requires OAuth2 — will be added in Phase 4)
+    # Step 4: Analytics API (requires OAuth2)
     analytics_count = 0
     traffic_count = 0
     analytics_errors: list[str] = []
@@ -86,10 +115,16 @@ def run_pipeline(snapshot_date: date) -> dict:
         analytics_count, traffic_count, analytics_errors = _run_analytics(
             video_ids, analytics_date, snapshot_date, bq_writer
         )
+        log.info(f"Wrote daily_video_analytics — {analytics_count} rows")
+        log.info(f"Wrote daily_traffic_sources — {traffic_count} rows")
+        if analytics_errors:
+            log.warning(
+                f"Analytics API had {len(analytics_errors)} partial errors"
+            )
     except ImportError:
-        logger.info("Analytics API module not available — skipping analytics collection")
+        log.info("Analytics API module not available — skipping")
     except Exception as e:
-        logger.warning(f"Analytics API failed entirely: {e}")
+        log.warning(f"Analytics API failed entirely: {e}")
         analytics_errors.append(f"Analytics API: {str(e)}")
 
     # Build summary
