@@ -107,7 +107,7 @@ A third API exists — the **YouTube Reporting API (v1)** — which provides the
 
 If you're using Claude Code, paste this prompt:
 
-> Install the Google Cloud CLI (`gcloud`) on my machine. Detect my OS and architecture, download the correct package, run the installer, and walk me through `gcloud init` to authenticate and select my project.
+> Install the Google Cloud CLI (`gcloud`) on my machine. Detect my OS and architecture, download the correct package, run the installer, and walk me through `gcloud init` to authenticate and select my project. Here is the official documentation: https://cloud.google.com/sdk/docs/install-sdk
 
 Or install manually via the [official guide](https://cloud.google.com/sdk/docs/install-sdk). The `bq` CLI is included with gcloud — no separate install needed.
 
