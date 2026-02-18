@@ -49,7 +49,9 @@ curl -s "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetail
 
 ## Video Script Structure (for demo flow)
 
-The video follows this section structure. The build should naturally align with these sections:
+**Note:** The build is complete and all sections below have been implemented. These remain as reference for the video edit and any future content.
+
+The video follows this section structure:
 
 1. **Architecture overview** — explain what we're building (4 tables, 2 APIs, Cloud Function, Scheduler)
 2. **The Prompt** — show the structured PROMPT.md
@@ -73,7 +75,26 @@ The video follows this section structure. The build should naturally align with 
 - **Scheduler:** Google Cloud Scheduler
 - **Secrets:** Google Cloud Secret Manager
 - **APIs:** YouTube Data API v3, YouTube Analytics API v2
-- **Libraries:** google-cloud-bigquery, google-api-python-client, google-auth
+- **Libraries:** google-cloud-bigquery, google-api-python-client, google-auth, google-cloud-logging, google-cloud-secret-manager
+
+## Cloud Function Configuration
+
+- **Function name:** `youtube-bigquery-pipeline`
+- **Runtime:** Python 3.11, 2nd gen, Memory: 512MB, Timeout: 540s (9 min)
+- **Entry point:** `main` function in `cloud_function/main.py`
+- **Environment variables:** `GCP_PROJECT`, `BQ_DATASET`, `YOUTUBE_CHANNEL_ID`, `UPLOADS_PLAYLIST_ID`
+- **Secrets (from Secret Manager):** `youtube-data-api-key`, `youtube-oauth-client-id`, `youtube-oauth-client-secret`, `youtube-oauth-refresh-token`
+- **IAM roles needed:** `cloudbuild.builds.builder`, `secretmanager.secretAccessor`, `bigquery.dataEditor`, `bigquery.jobUser`
+
+## Key Code Patterns
+
+- **Idempotent writes:** DELETE + batch load (not streaming inserts) — avoids BigQuery streaming buffer consistency issues
+- **Structured logging:** JSON via `google.cloud.logging`, each run tagged with `run_id` (UUID prefix)
+- **Graceful degradation:** Analytics API failure doesn't crash pipeline; Data API tables always populated
+- **Exponential backoff:** 2^attempt seconds on 429s, max 3 retries (Analytics API)
+- **Traffic sources:** Require per-video calls (can't batch); video analytics is a single call for all videos
+- **Lookback window:** `ANALYTICS_LOOKBACK_DAYS = 3` (Analytics API data has ~2-3 day latency)
+- **Shorts threshold:** `SHORTS_THRESHOLD_SECONDS = 180`
 
 ## Cost Expectations
 
@@ -97,32 +118,29 @@ Claude Code is building this project with the following access:
 - **Git:** Can stage, commit, and manage the local repo (pushes require user approval)
 - **No access to:** GCP Console UI, browser-based OAuth flows, or the YouTube Studio dashboard. Kyle handles those manually when needed.
 
-## Build Process Documentation
+## Documentation
 
-**As we build, continuously update README.md with the actual steps taken, commands run, and issues encountered.** After the build is complete, we'll organize the README into a polished guide. For now, document everything in the order it happens — this serves as both a build log and the foundation for the final README.
+The build is complete. README.md contains the finalized deployment guide and build log. Keep it in sync with any future changes to the pipeline.
 
-Include:
+## Current Deployment Status
 
-- Each setup/deployment step with the exact commands used
-- Any errors hit and how they were resolved (great video content)
-- Environment prerequisites and authentication steps
-- Architecture decisions made along the way
-
-## Research Findings (Pre-Build)
-
-Completed the PROMPT.md research checklist. Results:
+Fully deployed as of 2026-02-17. All components operational.
 
 - **GCP Project ID:** `primeval-node-478707-e9`
-- **Already enabled APIs:** BigQuery (+ related), YouTube Data API v3, Cloud Storage, Logging, Monitoring
-- **Not yet enabled:** Cloud Functions, Cloud Scheduler, Secret Manager, YouTube Analytics API, Cloud Build
-- **BigQuery datasets:** None (fresh start)
-- **Cloud Functions:** None
-- **Cloud Scheduler jobs:** None
-- **YouTube API key:** Had to fix — the key in `~/.zshrc` was from a different project. Updated to match the key in `primeval-node-478707-e9`. Confirmed working against the channel.
+- **APIs enabled:** BigQuery, YouTube Data API v3, YouTube Analytics API, Cloud Functions, Cloud Scheduler, Secret Manager, Cloud Build, Cloud Run, Cloud Storage, Logging, Monitoring
+- **BigQuery dataset:** `youtube_analytics` with 4 populated tables (`video_metadata`, `daily_video_stats`, `daily_video_analytics`, `daily_traffic_sources`)
+- **Cloud Function:** `youtube-bigquery-pipeline` deployed (2nd gen, Python 3.11, 512MB, 540s timeout)
+- **Cloud Scheduler:** `youtube-daily-snapshot` running daily at 11:50 PM Phoenix time (`America/Phoenix`, no DST)
+- **OAuth2:** Configured and operational — refresh token + client credentials in Secret Manager
+- **Historical backfill:** Complete — Analytics API data from Oct 16, 2025 (first video) to Feb 17, 2026 via `setup/backfill_analytics.py`
 - **Channel stats at build start (2026-02-17):** 63 videos, 278 subscribers, 30,565 views
-- **OAuth2 credentials:** Created and stored in Secret Manager — Analytics API fully operational
-- **Cloud Scheduler:** Daily at 11:50 PM Phoenix time (`America/Phoenix`, no DST)
-- **Historical backfill:** Analytics API data backfilled from Oct 16, 2025 (first video) to Feb 17, 2026 via `setup/backfill_analytics.py`
+
+## Known Limitations
+
+- `impressions` and `impression_ctr` columns in `daily_video_analytics` are always `NULL` — the Analytics API offers `videoThumbnailImpressions` and `videoThumbnailImpressionsClickRate` but they're not yet wired in
+- `annotation_click_through_rate` and `card_click_rate` are also `NULL` (not in current API query)
+- Analytics API quota is not publicly documented like the Data API's 10,000 unit system
+- Recent Google docs suggest `youtube.readonly` scope may now be required alongside `yt-analytics.readonly` — current single-scope config still works but worth monitoring
 
 ## Additional API Fields Not Yet Captured
 
