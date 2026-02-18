@@ -93,7 +93,7 @@ Claude Code is building this project with the following access:
 - **gcloud CLI:** Authenticated to GCP project `primeval-node-478707-e9` — can enable APIs, create BigQuery resources, deploy Cloud Functions, manage Scheduler jobs
 - **bq CLI:** Can create datasets, tables, and run queries against BigQuery
 - **YouTube Data API v3:** Via `YOUTUBE_API_KEY` env var — can fetch video metadata and public stats
-- **YouTube Analytics API:** Not yet accessible — requires OAuth2 setup with the channel owner's consent
+- **YouTube Analytics API:** Accessible via OAuth2 — refresh token + client credentials stored in Secret Manager
 - **Git:** Can stage, commit, and manage the local repo (pushes require user approval)
 - **No access to:** GCP Console UI, browser-based OAuth flows, or the YouTube Studio dashboard. Kyle handles those manually when needed.
 
@@ -120,4 +120,14 @@ Completed the PROMPT.md research checklist. Results:
 - **Cloud Scheduler jobs:** None
 - **YouTube API key:** Had to fix — the key in `~/.zshrc` was from a different project. Updated to match the key in `primeval-node-478707-e9`. Confirmed working against the channel.
 - **Channel stats at build start (2026-02-17):** 63 videos, 278 subscribers, 30,565 views
-- **OAuth2 credentials:** Not yet created — needed for Analytics API
+- **OAuth2 credentials:** Created and stored in Secret Manager — Analytics API fully operational
+- **Cloud Scheduler:** Daily at 11:50 PM Phoenix time (`America/Phoenix`, no DST)
+- **Historical backfill:** Analytics API data backfilled from Oct 16, 2025 (first video) to Feb 17, 2026 via `setup/backfill_analytics.py`
+
+## Additional API Fields Not Yet Captured
+
+**YouTube Data API v3:** `description`, `defaultLanguage`, `defaultAudioLanguage`, `liveBroadcastContent`, `topicCategories`, `definition`, `caption`
+
+**YouTube Analytics API v2 (additional metrics):** `annotationCloseRate`, `cardImpressions`, `cardClicks`, `audienceWatchRatio`, `likes`/`dislikes`
+
+**YouTube Analytics API v2 (new dimensions — would need new tables):** `ageGroup`/`gender` (demographics, requires additional OAuth scope), `country`/`province` (geography), `insightPlaybackLocationType` (playback location)
