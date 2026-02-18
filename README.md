@@ -42,24 +42,26 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
                 │                 BigQuery                         │
                 │            dataset: youtube_analytics            │
                 │                                                  │
-                │  ┌─────────────────┐  ┌───────────────────────┐  │
-                │  │ video_metadata  │  │  daily_video_stats    │  │
-                │  │                 │  │                       │  │
-                │  │ title, duration │  │ views, likes,         │  │
-                │  │ type, tags      │  │ comments, favorites   │  │
-                │  │ (updated daily) │  │ (appended daily)      │  │
-                │  └─────────────────┘  └───────────────────────┘  │
+                │        video_metadata (dimension table)          │
+                │        ┌──────────────────────────────┐          │
+                │        │ video_id, title, duration,   │          │
+                │        │ type, tags, published_at     │          │
+                │        │ (refreshed daily — Data API) │          │
+                │        └─────┬──────────┬─────────┬───┘          │
+                │          1:1 │      1:1 │   1:many│              │
+                │              ▼          ▼         ▼              │
+                │  ┌───────────────┐ ┌──────────┐ ┌────────────┐  │
+                │  │ daily_video_  │ │ daily_   │ │ daily_     │  │
+                │  │ stats         │ │ video_   │ │ traffic_   │  │
+                │  │               │ │ analytics│ │ sources    │  │
+                │  │ views, likes, │ │          │ │            │  │
+                │  │ comments      │ │ watch    │ │ source,    │  │
+                │  │ (cumulative)  │ │ time,    │ │ views,     │  │
+                │  │               │ │ CTR,subs │ │ watch time │  │
+                │  │ (Data API)    │ │(Ana. API)│ │ (Ana. API) │  │
+                │  └───────────────┘ └──────────┘ └────────────┘  │
                 │                                                  │
-                │  ┌─────────────────┐  ┌───────────────────────┐  │
-                │  │ daily_video_    │  │ daily_traffic_        │  │
-                │  │ analytics       │  │ sources               │  │
-                │  │                 │  │                       │  │
-                │  │ watch time,     │  │ source type,          │  │
-                │  │ impressions,    │  │ views, watch time     │  │
-                │  │ CTR, subs       │  │ (appended daily)      │  │
-                │  │ (appended daily)│  │                       │  │
-                │  └─────────────────┘  └───────────────────────┘  │
-                │                                                  │
+                │  Join key: (video_id, snapshot_date)             │
                 │  All tables partitioned by snapshot_date         │
                 └──────────────────────────────────────────────────┘
 ```
@@ -73,6 +75,23 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 - **Secret Manager** stores OAuth2 credentials so no secrets live in code
 - **BigQuery** stores daily snapshots partitioned by date for efficient querying
 - Everything runs within GCP free tier
+
+---
+
+## Why Two YouTube APIs?
+
+YouTube has two separate APIs that give you different data:
+
+| | Data API v3 | Analytics API v2 |
+|--|-------------|-------------------|
+| **What it gives you** | Public stats: views, likes, comments, video metadata | Private creator data: watch time, avg view duration, traffic sources, impressions, CTR, subscriber gains/losses |
+| **Authentication** | API key (simple) | OAuth2 (must prove channel ownership) |
+| **Data type** | Cumulative totals (views only go up) | Per-day activity metrics (not cumulative) |
+| **Think of it as** | The "what" — how many views | The "why" — where views came from and how long people watched |
+
+We need both to get the full picture. The Data API tells you a video has 10,000 views. The Analytics API tells you 60% came from YouTube search, viewers watched an average of 4 minutes, and the video gained 12 subscribers.
+
+A third API exists — the **YouTube Reporting API (v1)** — which provides the same analytics data as bulk downloadable reports. It's designed for large content networks processing millions of videos. For a single-channel daily pipeline, the Analytics API v2 is the right choice.
 
 ---
 
@@ -108,6 +127,25 @@ Then `source ~/.zshrc` to load them.
 ## BigQuery Schema
 
 All tables live in the `youtube_analytics` dataset and are partitioned by `snapshot_date` for cost-efficient querying.
+
+**The four tables at a glance:**
+
+| Table | Role | Source | Pattern |
+|-------|------|--------|---------|
+| `video_metadata` | Dimension table | Data API v3 | Refreshed daily (titles can change) |
+| `daily_video_stats` | Fact table | Data API v3 | Append-only cumulative counters |
+| `daily_video_analytics` | Fact table | Analytics API v2 | Append-only per-day activity metrics |
+| `daily_traffic_sources` | Fact table | Analytics API v2 | Append-only per-day, one row per source type |
+
+**Table relationships (star schema):**
+
+`video_metadata` is the central dimension table. The three fact tables join to it via `video_id` + `snapshot_date`:
+
+- `video_metadata` → `daily_video_stats` — **1:1** per video per day. Every video gets a stats row on every pipeline run.
+- `video_metadata` → `daily_video_analytics` — **1:1** per video per day. Only videos with activity on the analytics date get rows.
+- `video_metadata` → `daily_traffic_sources` — **1:many** per video per day. One row per traffic source type (e.g., `YT_SEARCH`, `SUGGESTED`, `BROWSE_FEATURES`).
+
+**Semantic note:** `snapshot_date` means different things depending on the source. For Data API tables (`video_metadata`, `daily_video_stats`), it's the date the pipeline ran and values are cumulative totals as of that day. For Analytics API tables (`daily_video_analytics`, `daily_traffic_sources`), it's the analytics date and values represent that single day's activity.
 
 ### `video_metadata`
 
@@ -389,6 +427,10 @@ Everything runs within GCP free tier:
 | BigQuery | 10GB storage, 1TB queries | Tiny |
 | YouTube Data API | 10,000 units/day | ~4 units |
 | Secret Manager | 10,000 access ops/month | ~4/day |
+
+**Quota math for the YouTube Data API:** Each pipeline run makes 2 `playlistItems.list` calls (1 unit each, paginating 63 videos at 50/page) + 2 `videos.list` calls (1 unit each, batching 63 videos at 50/batch) = **4 units total** out of 10,000 daily. The YouTube Analytics API is a separate API with its own quota — its calls do not count against the Data API's 10,000 unit limit.
+
+**Note:** Cloud Scheduler's 3 free jobs is per **billing account**, not per project. If you run multiple GCP projects on the same billing account, all scheduler jobs across projects share the 3-job limit.
 
 ---
 
