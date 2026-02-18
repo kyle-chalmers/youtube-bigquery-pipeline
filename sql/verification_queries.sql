@@ -100,3 +100,80 @@ LEFT JOIN `youtube_analytics.video_metadata` m
 WHERE m.video_id IS NULL
 ORDER BY a.snapshot_date DESC
 LIMIT 20;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- Backfill Insight Queries (daily_video_analytics + daily_traffic_sources)
+-- Run these after the backfill completes to surface peak performance days.
+-- ═══════════════════════════════════════════════════════════════
+
+-- ─── 5. Best days for subscriber growth ─────────────────────────
+-- Aggregates net subscribers gained across all videos per day. Surfaces the
+-- days where the channel grew fastest — useful for correlating with uploads,
+-- external mentions, or algorithm boosts.
+SELECT
+    snapshot_date,
+    SUM(subscribers_gained) AS total_gained,
+    SUM(subscribers_lost) AS total_lost,
+    SUM(subscribers_gained) - SUM(subscribers_lost) AS net_subscribers
+FROM `youtube_analytics.daily_video_analytics`
+GROUP BY snapshot_date
+ORDER BY net_subscribers DESC
+LIMIT 10;
+
+
+-- ─── 6. Best days for views (Analytics API) ────────────────────
+-- Sums views across all traffic sources per day. Unlike the Data API (which
+-- only stores cumulative totals), these are actual per-day view counts from
+-- the Analytics API — the true measure of daily viewership.
+SELECT
+    snapshot_date,
+    SUM(views) AS total_views,
+    ROUND(SUM(estimated_minutes_watched), 1) AS total_watch_minutes,
+    ROUND(SUM(estimated_minutes_watched) / NULLIF(SUM(views), 0), 2) AS avg_minutes_per_view
+FROM `youtube_analytics.daily_traffic_sources`
+GROUP BY snapshot_date
+ORDER BY total_views DESC
+LIMIT 10;
+
+
+-- ─── 7. Best days for total traffic (watch minutes) ────────────
+-- Ranks days by total estimated watch minutes across all sources. Watch time
+-- is YouTube's primary ranking signal, so days with high watch minutes indicate
+-- strong algorithmic performance or viral moments.
+SELECT
+    snapshot_date,
+    ROUND(SUM(estimated_minutes_watched), 1) AS total_watch_minutes,
+    SUM(views) AS total_views,
+    ROUND(SUM(estimated_minutes_watched) / NULLIF(SUM(views), 0), 2) AS avg_minutes_per_view
+FROM `youtube_analytics.daily_traffic_sources`
+GROUP BY snapshot_date
+ORDER BY total_watch_minutes DESC
+LIMIT 10;
+
+
+-- ─── 8. Best day per traffic source ────────────────────────────
+-- For each traffic source type, finds the single day with the most views.
+-- Reveals peak performance per discovery channel — e.g., when did the Shorts
+-- feed drive the most views? When did YouTube Search peak? Helpful for
+-- understanding which sources have spiked and when.
+SELECT
+    traffic_source_type,
+    snapshot_date AS peak_date,
+    views AS peak_views,
+    ROUND(estimated_minutes_watched, 1) AS peak_watch_minutes
+FROM (
+    SELECT
+        traffic_source_type,
+        snapshot_date,
+        SUM(views) AS views,
+        SUM(estimated_minutes_watched) AS estimated_minutes_watched,
+        ROW_NUMBER() OVER (
+            PARTITION BY traffic_source_type
+            ORDER BY SUM(views) DESC
+        ) AS rn
+    FROM `youtube_analytics.daily_traffic_sources`
+    GROUP BY traffic_source_type, snapshot_date
+)
+WHERE rn = 1
+ORDER BY peak_views DESC;
