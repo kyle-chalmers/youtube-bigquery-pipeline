@@ -105,6 +105,86 @@ Then `source ~/.zshrc` to load them.
 
 ---
 
+## BigQuery Schema
+
+All tables live in the `youtube_analytics` dataset and are partitioned by `snapshot_date` for cost-efficient querying.
+
+### `video_metadata`
+
+Slowly changing dimension — refreshed daily with the latest metadata from the YouTube Data API v3. One row per video per day.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `video_id` | STRING | YouTube video ID (e.g., `5_q7j-k8DbM`) |
+| `title` | STRING | Video title (can change over time — snapshots capture changes) |
+| `published_at` | TIMESTAMP | When the video was originally published |
+| `duration_seconds` | INT64 | Video length in seconds |
+| `duration_formatted` | STRING | Human-readable duration (e.g., `12:34` or `1:12:54`) |
+| `video_type` | STRING | `short` (<=180s) or `full_length` |
+| `tags` | STRING | Comma-separated tags set by the creator |
+| `category_id` | STRING | YouTube category ID (e.g., `28` = Science & Technology) |
+| `thumbnail_url` | STRING | URL of the highest-resolution thumbnail |
+| `snapshot_date` | DATE | Date this snapshot was captured (partition key) |
+
+### `daily_video_stats`
+
+Append-only daily snapshots of public stats from the YouTube Data API v3. These are cumulative counters — views only go up over time.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `snapshot_date` | DATE | Date this snapshot was captured (partition key) |
+| `video_id` | STRING | YouTube video ID |
+| `view_count` | INT64 | Total cumulative views as of snapshot time |
+| `like_count` | INT64 | Total cumulative likes |
+| `comment_count` | INT64 | Total cumulative comments |
+| `favorite_count` | INT64 | Total cumulative favorites (rarely used) |
+
+### `daily_video_analytics`
+
+Append-only daily snapshots from the YouTube Analytics API v2. These are per-day metrics (not cumulative) — they represent activity for a specific analytics date. Only videos with activity on the lookback date will have rows.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `snapshot_date` | DATE | Date the pipeline ran (partition key) |
+| `video_id` | STRING | YouTube video ID |
+| `estimated_minutes_watched` | FLOAT64 | Total watch time in minutes across all viewers |
+| `average_view_duration_seconds` | FLOAT64 | How long the average viewer watched before leaving |
+| `average_view_percentage` | FLOAT64 | Percentage of the video the average viewer watched (e.g., 45.0 = 45%) |
+| `impressions` | INT64 | Times YouTube showed the thumbnail (NULL until aggregated from traffic data) |
+| `impression_ctr` | FLOAT64 | Click-through rate on impressions (NULL until aggregated from traffic data) |
+| `subscribers_gained` | INT64 | Subscriptions gained from this video |
+| `subscribers_lost` | INT64 | Subscriptions lost from this video |
+| `shares` | INT64 | Times the video was shared (share button, copy link, etc.) |
+| `annotation_click_through_rate` | FLOAT64 | Click rate on annotations (legacy — mostly NULL for newer videos) |
+| `card_click_rate` | FLOAT64 | Click rate on info cards (the "i" popups added to videos) |
+
+### `daily_traffic_sources`
+
+Append-only from the YouTube Analytics API v2. One row per video per traffic source type — shows where viewers discovered each video.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `snapshot_date` | DATE | Date the pipeline ran (partition key) |
+| `video_id` | STRING | YouTube video ID |
+| `traffic_source_type` | STRING | How viewers found the video (see values below) |
+| `views` | INT64 | Views from this source on the analytics date |
+| `estimated_minutes_watched` | FLOAT64 | Watch time from this source |
+
+**Common `traffic_source_type` values:**
+
+| Source | Meaning |
+|--------|---------|
+| `YT_SEARCH` | Found via YouTube search |
+| `SUGGESTED` | Recommended in sidebar or feed |
+| `BROWSE_FEATURES` | Home page, subscription feed, trending |
+| `EXT_URL` | External website (blog, Reddit, social media) |
+| `NOTIFICATION` | Bell or push notification |
+| `PLAYLIST` | Watched via a playlist |
+| `SHORTS` | Shorts feed |
+| `NO_LINK_OTHER` | Direct URL or uncategorized |
+
+---
+
 ## Deployment (Step by Step)
 
 Run the setup scripts in order. Each script is idempotent (safe to re-run).
