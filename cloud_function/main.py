@@ -110,6 +110,13 @@ def run_pipeline(snapshot_date: date, log: logging.LoggerAdapter) -> dict:
     traffic_count = 0
     analytics_errors: list[str] = []
 
+    # Analytics path runs under a separate try/except so an OAuth/auth failure
+    # does not kill the Data API snapshot. Trade-off: failures here are silent
+    # in the HTTP response (200 with empty rows). The Cloud Monitoring alert
+    # `youtube-analytics-failure` is what catches this. It watches for two log strings:
+    # `Wrote daily_video_analytics — 0 rows` and `Analytics API failed entirely`.
+    # If you change those log lines below, update the log-based metric filter
+    # in `setup/6_setup_monitoring.sh` to match.
     try:
         analytics_date = snapshot_date - timedelta(days=ANALYTICS_LOOKBACK_DAYS)
         analytics_count, traffic_count, analytics_errors = _run_analytics(

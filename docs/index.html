@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YouTube Analytics Pipeline</title>
+    <meta name="description" content="A single-user pipeline that snapshots YouTube channel analytics into BigQuery for historical trend analysis.">
+    <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="header-inner">
+            <a class="brand" href="./" aria-label="YouTube Analytics Pipeline home">
+                <img src="assets/logo.png" alt="KC Labs AI logo">
+                <span>YouTube Analytics Pipeline</span>
+            </a>
+            <nav aria-label="Primary">
+                <a href="privacy.html">Privacy</a>
+                <a href="terms.html">Terms</a>
+                <a href="https://github.com/kyle-chalmers/youtube-bigquery-pipeline">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <h1>YouTube Analytics Pipeline</h1>
+            <p class="lead">A daily pipeline that snapshots YouTube channel analytics into BigQuery for historical trend analysis.</p>
+        </section>
+
+        <section class="summary-grid" aria-label="App summary">
+            <div class="summary-item">
+                <strong>Use case</strong>
+                <span>Personal analytics for the developer's own YouTube channel.</span>
+            </div>
+            <div class="summary-item">
+                <strong>Storage</strong>
+                <span>BigQuery tables in the developer's Google Cloud project.</span>
+            </div>
+            <div class="summary-item">
+                <strong>Access</strong>
+                <span>Read-only YouTube Analytics API access.</span>
+            </div>
+        </section>
+
+        <section>
+            <h2>What This App Does</h2>
+            <p>YouTube Analytics Pipeline reads YouTube Analytics reports for a channel owned by the consenting Google account and writes daily snapshots to BigQuery. The dataset is used to analyze trends over time, including watch time, retention, subscriber changes, shares, and traffic source performance.</p>
+            <p>The app is a single-user automation tool. It is not a hosted analytics service, it does not provide accounts for other users, and it does not publish private YouTube Analytics data.</p>
+        </section>
+
+        <section>
+            <h2>What This App Accesses</h2>
+            <p>The app requests the OAuth scope <code>https://www.googleapis.com/auth/yt-analytics.readonly</code>. This scope allows the app to view YouTube Analytics reports for YouTube content owned by the consenting account.</p>
+            <p>The app uses this read-only scope to fetch analytics metrics such as estimated minutes watched, average view duration, average view percentage, subscribers gained, subscribers lost, shares, views, and traffic source breakdowns.</p>
+        </section>
+
+        <section>
+            <h2>Who Can Use This</h2>
+            <p>This app is intended for the developer's own YouTube channel. The OAuth grant is completed by the Google account that owns or manages that channel, and the resulting data is stored only in the developer's Google Cloud project.</p>
+        </section>
+
+        <section class="callout">
+            <h2>Privacy and Terms</h2>
+            <p>Read the <a href="privacy.html">Privacy Policy</a> for details on Google user data access, use, storage, sharing, retention, deletion, and security practices. Read the <a href="terms.html">Terms of Service</a> for app usage terms.</p>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <p>Contact: <a href="mailto:contact@kclabs.ai">contact@kclabs.ai</a></p>
+    </footer>
+</body>
+</html>

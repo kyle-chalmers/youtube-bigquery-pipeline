@@ -116,8 +116,10 @@ Operational specifics (initial deploy date, channel stats at build, current inge
 
 ## Known Limitations
 
-- `impressions` and `impression_ctr` columns in `daily_video_analytics` are always `NULL` — the Analytics API offers `videoThumbnailImpressions` and `videoThumbnailImpressionsClickRate` but they are not yet wired in
-- `annotation_click_through_rate` and `card_click_rate` are also `NULL` (not in current API query)
+- `impressions` and `impression_ctr` columns in `daily_video_analytics` are always `NULL`. YouTube Studio's "Impressions" and "Impressions CTR" come from an internal Google API. The public YouTube Analytics API v2 does not expose them at the per-video level (probed 2026-05-25: `impressions`, `videoThumbnailImpressions`, and `videoThumbnailImpressionsClickRate` all rejected). Columns are kept for forward compatibility.
+- `annotation_click_through_rate` always `NULL` — YouTube retired annotations in 2019.
+- `card_click_rate` always `NULL` — `cardClickRate`/`cardImpressions` ARE valid metrics but require per-video calls with `filters=video==X`, and this channel does not use cards. Wire it up if cards start being used.
+- The OAuth app is in "Production / Unverified" mode with the sensitive `yt-analytics.readonly` scope. Refresh tokens issued to it expire **every 7 days**. When the token dies, the pipeline silently writes 0 analytics rows (the wrapper in `main.py` swallows the `invalid_grant` error). Rotation procedure lives in `.internal/REFRESH_TOKEN_ROTATION.md`. To remove the 7-day cap permanently, submit the app for Google verification.
 - Analytics API quota is not publicly documented like the Data API's 10,000-unit system
 - Recent Google docs suggest `youtube.readonly` scope may now be required alongside `yt-analytics.readonly` — current single-scope config still works but worth monitoring
 

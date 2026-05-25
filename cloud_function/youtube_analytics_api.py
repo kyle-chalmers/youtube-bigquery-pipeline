@@ -124,7 +124,12 @@ class YouTubeAnalyticsAPI:
                     "subscribers_gained": row[4],
                     "subscribers_lost": row[5],
                     "shares": row[6],
-                    # Impressions/CTR populated from traffic source data
+                    # Always NULL — see "Known Limitations" in CLAUDE.md.
+                    # Thumbnail impressions/CTR are not exposed by the public
+                    # YouTube Analytics API v2 (Studio UI uses an internal one).
+                    # Annotations were retired by YouTube in 2019.
+                    # Card metrics require per-video calls with filters=video==X
+                    # and are all-zero on this channel (no cards used).
                     "impressions": None,
                     "impression_ctr": None,
                     "annotation_click_through_rate": None,
