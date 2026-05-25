@@ -2,9 +2,9 @@
 
 ## Context
 
-Build a daily automated pipeline that snapshots YouTube analytics into BigQuery for the KC Labs AI channel. The repo is clean (only docs exist) — all implementation code needs to be created from scratch. This build is being recorded as a YouTube video, so the process should be incremental and demonstrable.
+Build a daily automated pipeline that snapshots YouTube analytics into BigQuery for the operator's channel. The repo is clean (only docs exist) — all implementation code needs to be created from scratch. The process is incremental: each phase produces a working checkpoint.
 
-**Current state:** GCP project `primeval-node-478707-e9` is set up with BigQuery and YouTube Data API v3 enabled. No datasets, functions, or scheduler jobs exist yet. OAuth2 for Analytics API is not configured.
+**Current state:** target GCP project (referenced via `GCP_PROJECT` env var) is set up with BigQuery and YouTube Data API v3 enabled. No datasets, functions, or scheduler jobs exist yet. OAuth2 for Analytics API is not configured.
 
 ---
 

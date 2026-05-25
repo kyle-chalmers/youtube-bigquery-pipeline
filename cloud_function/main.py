@@ -29,7 +29,7 @@ except Exception:
     logging.basicConfig(level=logging.INFO)
 
 # ─── Configuration ───────────────────────────────────────────────
-PROJECT_ID = os.environ.get("GCP_PROJECT", "primeval-node-478707-e9")
+PROJECT_ID = os.environ["GCP_PROJECT"]  # required — set in Cloud Function env or local .env
 DATASET_ID = os.environ.get("BQ_DATASET", "youtube_analytics")
 CHANNEL_ID = os.environ.get("YOUTUBE_CHANNEL_ID", "UCkRi29nXFxNBuPhjseoB6AQ")
 UPLOADS_PLAYLIST_ID = os.environ.get("UPLOADS_PLAYLIST_ID", "UUkRi29nXFxNBuPhjseoB6AQ")

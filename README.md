@@ -523,7 +523,7 @@ The geography and demographics data would be the most valuable for channel growt
 
 ### Step 0: Environment Verification (2026-02-17)
 
-Verified GCP project `primeval-node-478707-e9`. Found BigQuery and YouTube Data API already enabled. Fixed an API key mismatch (key was from a wrong project). Channel confirmed: 63 videos, 278 subscribers, 30,565 views.
+Verified target GCP project (set via `GCP_PROJECT` env var or active gcloud config). Found BigQuery and YouTube Data API already enabled. Fixed an API key mismatch (key was from a wrong project). Channel confirmed via uploads playlist enumeration.
 
 ### Step 1: Infrastructure Setup
 

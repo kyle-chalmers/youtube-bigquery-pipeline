@@ -11,6 +11,8 @@ import argparse
 import io
 import json
 import logging
+import os
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -24,8 +26,24 @@ from googleapiclient.errors import HttpError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
 
-PROJECT_ID = "primeval-node-478707-e9"
-DATASET_ID = "youtube_analytics"
+
+def _gcloud_default_project() -> str | None:
+    """Read the active gcloud default project, if any."""
+    try:
+        result = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        value = result.stdout.strip()
+        return value if value and value != "(unset)" else None
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+
+PROJECT_ID = os.environ.get("GCP_PROJECT") or _gcloud_default_project()
+if not PROJECT_ID:
+    raise SystemExit("GCP_PROJECT env var not set and no default gcloud project configured. Run `gcloud config set project <id>` or set GCP_PROJECT in your shell.")
+DATASET_ID = os.environ.get("BQ_DATASET", "youtube_analytics")
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 

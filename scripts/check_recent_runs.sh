@@ -5,8 +5,13 @@
 # Usage: ./scripts/check_recent_runs.sh
 
 set -e
-PROJECT="primeval-node-478707-e9"
-DATASET="youtube_analytics"
+PROJECT="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+if [ -z "$PROJECT" ] || [ "$PROJECT" = "(unset)" ]; then
+  echo "ERROR: GCP_PROJECT env var not set and no default gcloud project configured." >&2
+  echo "Run: gcloud config set project <your-project-id>" >&2
+  exit 1
+fi
+DATASET="${BQ_DATASET:-youtube_analytics}"
 DAYS="${1:-5}"
 
 echo "=== Pipeline health check (last ${DAYS} days) ==="
