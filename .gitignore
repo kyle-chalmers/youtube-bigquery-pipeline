@@ -47,3 +47,6 @@ Thumbs.db
 # Internal notes (not for public repo)
 .internal/
 .planning/
+
+# Local multi-AI review artifacts (not for the public repo)
+.ai-friend-review/
