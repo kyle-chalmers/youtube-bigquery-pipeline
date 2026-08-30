@@ -120,26 +120,19 @@ work rather than something you have to remember to ask for.
 ```markdown
 ## Working with data
 
-- Distinguish observed from inferred. A number you ran a query to get is observed. Anything else is
-  inferred, and must be labelled as such.
-- Every claim about the data comes with the query that produced it and the actual result. A finding
-  without a query is a hypothesis.
-- Read what writes a column before trusting what it is named. Column names describe intent; the
-  writing code describes contents.
-- State the grain of every table you touch, and say how you established it.
-- A count of zero means "this rule found no exceptions", not "there are no exceptions". Show the
-  rule beside the count.
-- Documentation describes intent. Where behavior matters, probe it and report what you observed.
-- Warehouse SQL shows you what arrived, never what was dropped on the way in. Anything about
-  completeness at the source needs the extract code and a reconciliation against the source itself.
-- Investigation is read-only. Any write to production data needs explicit approval first, including
-  the backup itself, and having a backup is not approval.
-- Aggregates are not automatically safe. Suppress or combine groups small enough to identify someone,
-  and ask before returning identifiers or individual rows.
-- Never delete or replace the original until the replacement exists and both sides are counted.
-- Surface findings outside the requested scope rather than fixing them silently, and do not act on
-  them in the current task. New findings get their own review.
-- Ship one logical change per commit, so a rollback is surgical rather than all-or-nothing.
+- Every claim comes with the query that produced it and the real result. Anything else is inference. Say which it is.
+- Read what writes a column before trusting its name. Names describe intent; the writing code describes contents.
+- State the grain of each table you touch, and how you established it.
+- A zero means the rule you tested found nothing, not that there is nothing. Show the rule beside the count.
+- A check written after the fix cannot validate the fix. Prefer one that predates it.
+- Documentation describes intent. Where behavior matters, probe it and report what you saw.
+- Warehouse SQL shows what arrived, never what was dropped on the way in.
+- Name the sources you actually read. If it was two pages, say that.
+- Treat the plan as a hypothesis. Report where the work departed from it, and why.
+- Investigation is read-only. Any production write needs approval first, the backup included.
+- Never replace the original until the replacement exists and both sides are counted.
+- Aggregates are not automatically safe. Suppress groups small enough to identify someone.
+- Surface out-of-scope findings without acting on them. Each gets its own review and its own commit.
 ```
 
 ---
