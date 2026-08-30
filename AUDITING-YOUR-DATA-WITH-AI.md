@@ -68,57 +68,38 @@ impartial recommendation. I have no relationship with the others.
 ## The audit prompt
 
 Paste this into an agent that has **both** your pipeline repo and your warehouse reachable, whether
-through an MCP server, a CLI it can run, or a notebook it can execute. There is one bracketed part
-to replace, the link to your source system's documentation.
+through an MCP server, a CLI it can run, or a notebook it can execute. One bracketed part to replace.
 
 > You have access to this data pipeline repo and to its warehouse. If you have questions about the
-> data or connecting to it, please let me know. Audit the DATA for correctness problems. Do not
-> review the code for style, and do not give me generic data-quality advice.
+> data or connecting to it, please let me know.
 >
-> Read-only everywhere. In the warehouse: read-only statements only, meaning SELECT, SHOW, DESCRIBE
-> and information_schema, with no DML, no DDL and no temp tables. Against the source system: GET
-> requests only. Do not modify, delete or backfill anything, and do not propose a fix until I have
-> seen the findings.
+> Audit the state of this data for quality problems. What I want to know is whether the numbers this
+> pipeline produces can be trusted, and where they cannot.
 >
-> For each table this pipeline writes, work out its true grain, meaning what one row actually
-> represents, proven by counting duplicate keys rather than inferred from the key definition or the
-> table name. Then work out what each date column ACTUALLY means by reading the code that writes it,
-> not by trusting what it is named. If the writer lives outside this repo, read the loader's
-> configuration and a raw source payload instead.
+> Look at all of it: the pipeline code, the tables themselves, the date columns, the joins in the
+> queries that read it back, and the extracts that load it. Things like a column whose name does not
+> match what it holds, a join that drops rows instead of returning zeros, gaps in something meant to
+> be continuous, the same event stored twice under different keys, an extract that truncates as the
+> source grows, or history that changed after it was collected. Those are examples, not the list.
+> Look for whatever else is actually there.
 >
-> Then write and RUN SQL that would expose a mismatch between what a column is named and what it
-> contains. Look specifically for:
-> - a date column whose meaning differs between two writers
-> - a join that silently drops rows instead of returning zeros
-> - gaps in a series that is supposed to be continuous
-> - the same real-world event stored more than once under different keys
-> - an API extract or export that could silently truncate as the source grows
-> - a table whose history changed after it was collected: check partition or file last-modified times
->   against collection dates, and name every process that writes to the table. Two writers with
->   different delete keys will silently destroy each other's rows.
+> How you work matters as much as what you find:
 >
-> The truncation check cannot be answered with warehouse SQL alone. Warehouse queries only show you
-> what arrived. Read the extract and pagination code directly, and reconcile what landed against a
-> documented source total or a sampled live call to the source.
->
-> For every finding, give me the query that proves it and the actual numbers it returned. If a result
-> would expose personal or customer data, give me the aggregate and the row count instead of the rows,
-> suppress or combine any group small enough to identify someone, and ask me before returning
-> identifiers or individual rows.
->
-> Before you call anything a defect, check the behavior against the official documentation for the
-> system that produced the data [link the source docs here], and tell me whether it is documented
-> behavior my code mishandles or genuinely unexpected. Where the documentation is ambiguous or merely
-> describes intent, probe the live behavior and report what you observed, not what the docs imply.
->
-> For any category where you find nothing, state the rule you tested, what a violation would have
-> looked like, and one query showing the check can actually detect a violation you construct on
-> purpose. A clean result with no stated rule does not count as a clean result.
->
-> If a completeness check cannot be performed because there is no documented source total and no live
-> call available, say so. Do not infer completeness from the warehouse.
->
-> If you find nothing in a category, say so plainly rather than inventing a concern.
+> - Read-only throughout. Read-only statements in the warehouse, GET requests against any source
+>   system. Do not modify, delete or backfill anything, and do not propose a fix until I have seen
+>   the findings.
+> - Every claim comes with the query that proves it and the real numbers it returned. A finding
+>   without a query is a hypothesis.
+> - Work out what a column means by reading the code that writes it, not by trusting its name. If
+>   the writer lives outside this repo, read the loader's configuration and a raw source payload.
+> - Documentation tells you intent. Where behavior matters, probe it and tell me what you observed.
+>   [link your source system's docs here]
+> - If a check comes back clean, tell me the rule you tested and what a violation would have looked
+>   like. A clean result with no stated rule does not count as a clean result.
+> - Say when you cannot verify something rather than inferring it. Warehouse queries only show you
+>   what arrived, never what was dropped on the way in.
+> - If a result would expose personal data, give me aggregates, suppress groups small enough to
+>   identify someone, and ask before returning identifiers or individual rows.
 
 If it comes back with generic advice instead of findings, reply: **"You have not run a single query
 yet. Run them."**
