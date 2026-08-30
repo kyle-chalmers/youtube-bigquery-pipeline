@@ -33,8 +33,13 @@ except Exception:
 # ─── Configuration ───────────────────────────────────────────────
 PROJECT_ID = os.environ["GCP_PROJECT"]  # required — set in Cloud Function env or local .env
 DATASET_ID = os.environ.get("BQ_DATASET", "youtube_analytics")
-CHANNEL_ID = os.environ.get("YOUTUBE_CHANNEL_ID", "UCkRi29nXFxNBuPhjseoB6AQ")
-UPLOADS_PLAYLIST_ID = os.environ.get("UPLOADS_PLAYLIST_ID", "UUkRi29nXFxNBuPhjseoB6AQ")
+# Required, with no default. A hardcoded channel default meant anyone who deployed this
+# repo without setting the env var silently scraped someone else's channel.
+CHANNEL_ID = os.environ["YOUTUBE_CHANNEL_ID"]
+# The uploads playlist is always the channel id with UC -> UU.
+UPLOADS_PLAYLIST_ID = os.environ.get(
+    "UPLOADS_PLAYLIST_ID", "UU" + CHANNEL_ID[2:] if CHANNEL_ID.startswith("UC") else ""
+)
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 # Cloud Run is UTC. The scheduler fires at 23:50 America/Phoenix, which is already
 # the next day in UTC, so date.today() stamped every row one day ahead of the local

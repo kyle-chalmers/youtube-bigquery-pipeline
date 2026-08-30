@@ -5,8 +5,14 @@ set -euo pipefail
 # Requires: APIs enabled (1_enable_apis.sh) and BigQuery tables created (2_create_bigquery.sh).
 
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
-REGION="us-central1"
+REGION="${GCP_REGION:-us-central1}"
 FUNCTION_NAME="youtube-bigquery-pipeline"
+
+# Required. Previously hardcoded to one channel, which meant anyone deploying this repo
+# pointed their function at that channel instead of their own.
+: "${YOUTUBE_CHANNEL_ID:?set YOUTUBE_CHANNEL_ID (UC-prefixed) before deploying}"
+# The uploads playlist is always the channel id with UC -> UU.
+UPLOADS_PLAYLIST_ID="${UPLOADS_PLAYLIST_ID:-UU${YOUTUBE_CHANNEL_ID#UC}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -26,7 +32,7 @@ gcloud functions deploy "$FUNCTION_NAME" \
     --no-allow-unauthenticated \
     --memory=512MB \
     --timeout=540s \
-    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=youtube_analytics,YOUTUBE_CHANNEL_ID=UCkRi29nXFxNBuPhjseoB6AQ,UPLOADS_PLAYLIST_ID=UUkRi29nXFxNBuPhjseoB6AQ" \
+    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=${BQ_DATASET:-youtube_analytics},YOUTUBE_CHANNEL_ID=$YOUTUBE_CHANNEL_ID,UPLOADS_PLAYLIST_ID=$UPLOADS_PLAYLIST_ID" \
     --set-secrets="YOUTUBE_API_KEY=youtube-data-api-key:latest" \
     --project="$PROJECT_ID"
 

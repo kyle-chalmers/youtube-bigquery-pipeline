@@ -1,5 +1,11 @@
 -- YouTube BigQuery Pipeline — Table DDL
--- All tables partitioned by snapshot_date for cost-efficient querying.
+-- Partitioning differs by table, on purpose:
+--   video_metadata, daily_video_stats     PARTITION BY snapshot_date (true daily snapshots)
+--   daily_video_analytics, daily_traffic_sources
+--                                         PARTITION BY activity_date (the day the views
+--                                         happened), CLUSTER BY video_id
+-- snapshot_date still exists on all four, but on the two analytics tables it means only
+-- "the day we collected this", which can be months after activity_date for recovered rows.
 
 -- Video metadata (slowly changing dimension — updated daily)
 CREATE TABLE IF NOT EXISTS `youtube_analytics.video_metadata` (
