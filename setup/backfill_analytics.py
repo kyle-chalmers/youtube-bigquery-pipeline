@@ -81,27 +81,53 @@ def api_call_with_retry(fn, max_retries: int = 5):
                 raise
 
 
-def fetch_video_analytics(analytics, query_date: date) -> list[dict[str, Any]]:
-    """Fetch per-video analytics for a single day."""
+# The unfiltered "Top videos" report caps at 200 rows and cannot be paged past it:
+# startIndex silently returns 0 rows unfiltered, HTTP 400 at maxResults=200, and
+# HTTP 500 on the filtered path. Adding filters=video== moves the request onto the
+# uncapped "Basic user activity statistics" report. Full citations in
+# cloud_function/youtube_analytics_api.py.
+#
+# Backfill-specific limit worth knowing (channel_reports): the traffic sources report
+# "returns an error if the product of # of queried videos X # of days in date range
+# exceeds 50,000". This script queries one day at a time, so it is far clear of that,
+# but do not widen the date range while filtering many videos.
+RESULT_CAP = 200
+SHARD_SIZE = 100
+
+METRICS = ("estimatedMinutesWatched,averageViewDuration,averageViewPercentage,"
+           "subscribersGained,subscribersLost,shares")
+
+
+def query_videos(analytics, date_str: str, video_ids=None) -> list:
+    """One video-dimension call, optionally restricted to a set of video ids."""
+    params = dict(ids="channel==MINE", startDate=date_str, endDate=date_str,
+                  dimensions="video", metrics=METRICS,
+                  sort="-estimatedMinutesWatched", maxResults=RESULT_CAP)
+    if video_ids:
+        params["filters"] = "video==" + ",".join(video_ids)
+    return api_call_with_retry(
+        lambda: analytics.reports().query(**params).execute()).get("rows", [])
+
+
+def fetch_video_analytics(analytics, query_date: date, video_ids=None) -> list[dict[str, Any]]:
+    """Fetch per-video analytics for a single day, working around the 200-row cap."""
     date_str = str(query_date)
     try:
-        response = api_call_with_retry(
-            lambda: analytics.reports().query(
-                ids="channel==MINE",
-                startDate=date_str,
-                endDate=date_str,
-                dimensions="video",
-                metrics="estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost,shares",
-                sort="-estimatedMinutesWatched",
-                maxResults=200,
-            ).execute()
-        )
+        api_rows = query_videos(analytics, date_str)
+        if len(api_rows) >= RESULT_CAP and video_ids:
+            logger.error(f"  {date_str} hit the {RESULT_CAP}-row cap; re-fetching in shards")
+            merged = {}
+            for i in range(0, len(video_ids), SHARD_SIZE):
+                for row in query_videos(analytics, date_str, video_ids[i:i + SHARD_SIZE]):
+                    merged[row[0]] = row
+            api_rows = list(merged.values())
+            logger.info(f"  sharded fetch recovered {len(api_rows)} rows for {date_str}")
     except Exception as e:
         logger.error(f"  Analytics query failed for {date_str}: {e}")
         return []
 
     rows = []
-    for row in response.get("rows", []):
+    for row in api_rows:
         rows.append({
             "video_id": row[0],
             "estimated_minutes_watched": row[1],
@@ -207,7 +233,7 @@ def main():
         logger.info(f"[{day_num}/{total_days}] Processing {current_date}...")
 
         # Fetch and write analytics
-        analytics_rows = fetch_video_analytics(analytics, current_date)
+        analytics_rows = fetch_video_analytics(analytics, current_date, video_ids)
         a_count = write_to_bigquery(bq_client, "daily_video_analytics", analytics_rows, current_date)
         total_analytics += a_count
 
