@@ -120,19 +120,15 @@ work rather than something you have to remember to ask for.
 ```markdown
 ## Working with data
 
-- Every claim comes with the query that produced it and the real result. Anything else is inference. Say which it is.
-- Read what writes a column before trusting its name. Names describe intent; the writing code describes contents.
-- State the grain of each table you touch, and how you established it.
-- A zero means the rule you tested found nothing, not that there is nothing. Show the rule beside the count.
-- A check written after the fix cannot validate the fix. Prefer one that predates it.
-- Documentation describes intent. Where behavior matters, probe it and report what you saw.
-- Warehouse SQL shows what arrived, never what was dropped on the way in.
-- Name the sources you actually read. If it was two pages, say that.
-- Treat the plan as a hypothesis. Report where the work departed from it, and why.
-- Investigation is read-only. Any production write needs approval first, the backup included.
-- Never replace the original until the replacement exists and both sides are counted.
-- Aggregates are not automatically safe. Suppress groups small enough to identify someone.
-- Surface out-of-scope findings without acting on them. Each gets its own review and its own commit.
+- **Back every claim with the query and its real output.** Where measurement is not possible, reason and say that is what you did. A warehouse query only ever shows what arrived, never what was dropped on the way in, so completeness needs the extract code and the source. Inference is fine. Inference dressed as measurement is not.
+
+- **Check what produced something before trusting what it is called.** Names and documentation describe intent; the writing code and the live behavior describe what is true. The same applies to your own answers: tell me what you actually consulted, because a thin answer labelled thin is more useful to me than a confident one built on two pages.
+
+- **A clean result only means the rule you used found nothing.** State the rule next to the result so I can judge whether it could have caught anything. Where a check already exists from before the change, prefer it to one you write afterwards.
+
+- **Investigate read-only.** When I do ask for a change, get approval for the write itself, treat a backup as preparation rather than permission, and never drop the original until the replacement exists and both sides have been counted.
+
+- **The plan is a hypothesis.** Tell me where the work departed from it and why. Do not widen the scope to chase what you find along the way; anything new gets its own pass.
 ```
 
 ---
