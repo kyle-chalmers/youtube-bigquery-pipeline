@@ -83,6 +83,9 @@ LIMIT 10;
 
 -- ─── 4. Shorts vs full-length performance comparison ─────────
 -- Compares average views, likes, comments, and engagement ratio (views_per_like)
+-- CAVEAT: since 2025-03-31 a Shorts view counts any start or replay with no
+-- minimum watch time, while a long-form view does not. avg_views is therefore not
+-- one metric across video_type and the two columns are not directly comparable.
 -- between shorts and full-length videos. A lower views_per_like means viewers
 -- are more likely to engage — full-length viewers typically like at a much higher
 -- rate than shorts viewers, who tend to be passive swipe-through traffic.
@@ -108,13 +111,23 @@ GROUP BY m.video_type;
 -- view delta using a window function. Shows whether the channel is accelerating
 -- or plateauing. The daily_view_delta is null for the earliest snapshot since
 -- there's no prior day to compare against.
+-- The delta is NULL when the previous snapshot is not exactly one day earlier.
+-- A missed run (2026-08-14 did not fire) otherwise silently reports two days of
+-- views as one, which reads as a traffic spike that never happened.
+WITH daily AS (
+    SELECT snapshot_date, SUM(view_count) AS total_views, SUM(like_count) AS total_likes
+    FROM `youtube_analytics.daily_video_stats`
+    GROUP BY snapshot_date
+)
 SELECT
     snapshot_date,
-    SUM(view_count) AS total_views,
-    SUM(like_count) AS total_likes,
-    SUM(view_count) - LAG(SUM(view_count)) OVER (ORDER BY snapshot_date) AS daily_view_delta
-FROM `youtube_analytics.daily_video_stats`
-GROUP BY snapshot_date
+    total_views,
+    total_likes,
+    IF(DATE_DIFF(snapshot_date, LAG(snapshot_date) OVER (ORDER BY snapshot_date), DAY) = 1,
+       total_views - LAG(total_views) OVER (ORDER BY snapshot_date),
+       NULL) AS daily_view_delta,
+    DATE_DIFF(snapshot_date, LAG(snapshot_date) OVER (ORDER BY snapshot_date), DAY) AS days_since_prev
+FROM daily
 ORDER BY snapshot_date DESC
 LIMIT 14;
 
@@ -132,8 +145,8 @@ SELECT
     ROUND(SUM(estimated_minutes_watched), 1) AS total_watch_minutes,
     ROUND(100.0 * SUM(views) / SUM(SUM(views)) OVER (), 1) AS pct_of_views
 FROM `youtube_analytics.daily_traffic_sources`
-WHERE snapshot_date = (
-    SELECT MAX(snapshot_date) FROM `youtube_analytics.daily_traffic_sources`
+WHERE activity_date = (
+    SELECT MAX(activity_date) FROM `youtube_analytics.daily_traffic_sources`
 )
 GROUP BY traffic_source_type
 ORDER BY total_views DESC;
@@ -145,6 +158,17 @@ ORDER BY total_views DESC;
 -- content converts viewers into subscribers. Full-length videos with high watch
 -- minutes tend to drive more subscriptions than shorts, making this useful for
 -- deciding what content format to invest in for channel growth.
+WITH latest_metadata_per_video AS (
+    -- The most recent metadata row PER VIDEO, not the most recent snapshot.
+    -- Matching the global latest snapshot silently drops any video that has since
+    -- left the channel, along with watch time it legitimately earned while it was
+    -- up. Taking the last row we ever saw for each video keeps that history and
+    -- still gives current titles for videos that are still published.
+    SELECT * EXCEPT (rn) FROM (
+        SELECT m.*, ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY snapshot_date DESC) AS rn
+        FROM `youtube_analytics.video_metadata` m
+    ) WHERE rn = 1
+)
 SELECT
     m.title,
     m.video_type,
@@ -152,13 +176,15 @@ SELECT
     a.subscribers_lost,
     a.subscribers_gained - a.subscribers_lost AS net_subscribers,
     ROUND(a.estimated_minutes_watched, 1) AS watch_minutes
+-- Metadata is joined per video, NOT on a matching date. Matching the two dates
+-- drops a video's launch-day rows, because analytics is keyed on activity_date
+-- and metadata on collection date.
 FROM `youtube_analytics.daily_video_analytics` a
-JOIN `youtube_analytics.video_metadata` m
-    USING (video_id)
-WHERE a.snapshot_date = (
-    SELECT MAX(snapshot_date) FROM `youtube_analytics.daily_video_analytics`
+JOIN latest_metadata_per_video m
+    ON m.video_id = a.video_id
+WHERE a.activity_date = (
+    SELECT MAX(activity_date) FROM `youtube_analytics.daily_video_analytics`
 )
-AND m.snapshot_date = a.snapshot_date
 ORDER BY net_subscribers DESC
 LIMIT 10;
 
@@ -169,6 +195,17 @@ LIMIT 10;
 -- avg_view_duration_sec shows the absolute time watched. High watch minutes
 -- with high avg_view_pct signals strong content; high watch minutes with low
 -- avg_view_pct may indicate a long video carried by volume rather than retention.
+WITH latest_metadata_per_video AS (
+    -- The most recent metadata row PER VIDEO, not the most recent snapshot.
+    -- Matching the global latest snapshot silently drops any video that has since
+    -- left the channel, along with watch time it legitimately earned while it was
+    -- up. Taking the last row we ever saw for each video keeps that history and
+    -- still gives current titles for videos that are still published.
+    SELECT * EXCEPT (rn) FROM (
+        SELECT m.*, ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY snapshot_date DESC) AS rn
+        FROM `youtube_analytics.video_metadata` m
+    ) WHERE rn = 1
+)
 SELECT
     m.title,
     m.video_type,
@@ -176,13 +213,13 @@ SELECT
     ROUND(a.estimated_minutes_watched, 1) AS watch_minutes,
     ROUND(a.average_view_percentage, 1) AS avg_view_pct,
     ROUND(a.average_view_duration_seconds, 0) AS avg_view_duration_sec
+-- See query 7 on why metadata is joined per video rather than by date.
 FROM `youtube_analytics.daily_video_analytics` a
-JOIN `youtube_analytics.video_metadata` m
-    USING (video_id)
-WHERE a.snapshot_date = (
-    SELECT MAX(snapshot_date) FROM `youtube_analytics.daily_video_analytics`
+JOIN latest_metadata_per_video m
+    ON m.video_id = a.video_id
+WHERE a.activity_date = (
+    SELECT MAX(activity_date) FROM `youtube_analytics.daily_video_analytics`
 )
-AND m.snapshot_date = a.snapshot_date
 ORDER BY a.estimated_minutes_watched DESC
 LIMIT 10;
 
