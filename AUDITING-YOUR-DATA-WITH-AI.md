@@ -69,7 +69,10 @@ impartial recommendation. I have no relationship with the others.
 
 ## The audit prompt
 
-Paste this into an agent that has **both** your pipeline repo and your warehouse reachable, whether
+This is not a transcript of what I typed. The audit was a conversation across many turns, so what
+follows is the distilled version of it, generalized to run against your data rather than mine.
+
+Paste it into an agent that has **both** your pipeline repo and your warehouse reachable, whether
 through an MCP server, a CLI it can run, or a notebook it can execute. One bracketed part to replace.
 
 > You have access to this data pipeline repo and to its warehouse. If you have questions about the
