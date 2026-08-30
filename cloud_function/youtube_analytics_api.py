@@ -192,11 +192,17 @@ class YouTubeAnalyticsAPI:
         )
         return all_rows, errors
 
+    # 429 is rate limiting; 500/502/503/504 are transient server faults. Both are
+    # worth retrying. Retrying only 429 silently dropped a video's traffic on the
+    # first HTTP 500, which is how two videos went missing during the 2026-08-29
+    # recovery until the retry was widened.
+    RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
     @staticmethod
     def _api_call_with_retry(
         callable_fn: Any, max_retries: int = 3
     ) -> dict[str, Any]:
-        """Execute an API call with exponential backoff on rate limits.
+        """Execute an API call with exponential backoff on transient failures.
 
         Args:
             callable_fn: Zero-argument callable that executes the API call.
@@ -212,10 +218,14 @@ class YouTubeAnalyticsAPI:
             try:
                 return callable_fn()
             except HttpError as e:
-                if e.resp.status == 429 and attempt < max_retries:
+                if (
+                    e.resp.status in YouTubeAnalyticsAPI.RETRYABLE_STATUSES
+                    and attempt < max_retries
+                ):
                     wait = 2**attempt
                     logger.warning(
-                        f"Rate limited, retrying in {wait}s (attempt {attempt + 1}/{max_retries})"
+                        f"HTTP {e.resp.status}, retrying in {wait}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
                     )
                     time.sleep(wait)
                 else:

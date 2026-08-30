@@ -3,6 +3,13 @@ set -euo pipefail
 
 # Create a Cloud Scheduler job to trigger the pipeline daily.
 # Requires: Cloud Function deployed (4_deploy_function.sh).
+#
+# The schedule is stated in America/Phoenix explicitly. An earlier version used
+# "50 6 * * *" with no --time-zone, which Cloud Scheduler reads as UTC. That fires
+# at the same instant, so it was not a bug on its own, but the script then
+# disagreed with the deployed job and read as though the pipeline ran at 6:50am.
+# Note this does NOT affect how rows are dated: snapshot_date comes from the
+# function (see PIPELINE_TZ in main.py), not from the scheduler.
 
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
 REGION="us-central1"
@@ -27,13 +34,14 @@ echo "Service account: $SERVICE_ACCOUNT"
 
 echo ""
 echo "Creating Cloud Scheduler job: $JOB_NAME"
-echo "  Schedule: 50 6 * * * (daily at 6:50 AM UTC / 11:50 PM MST)"
+echo "  Schedule: 50 23 * * * America/Phoenix (11:50 PM local, no DST)"
 echo "  Retries:  3 with exponential backoff (30s–300s)"
 echo ""
 
 gcloud scheduler jobs create http "$JOB_NAME" \
     --location="$REGION" \
-    --schedule="50 6 * * *" \
+    --schedule="50 23 * * *" \
+    --time-zone="America/Phoenix" \
     --uri="$FUNCTION_URL" \
     --http-method=POST \
     --oidc-service-account-email="$SERVICE_ACCOUNT" \
