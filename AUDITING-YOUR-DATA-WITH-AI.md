@@ -41,6 +41,8 @@ Data work hands you things you did not go looking for, so an unscoped session gr
 can follow it. Write the good ideas down for another day, ship the one you started, and keep the
 commits small enough that reversing a decision means reversing one thing.
 
+![Why nothing errored, and the loop to use instead](docs/diagrams/auditing-takeaways.png)
+
 ---
 
 ## Making a safe copy, for takeaway 3
@@ -151,6 +153,11 @@ For the record, run against this repo and its warehouse:
 | Days never collected | 4 |
 | Days recovered | 7 |
 | Days still missing after the fix | 2, both genuinely zero-activity |
+
+![One bug showing up in six places](docs/diagrams/one-bug-six-places.png)
+
+Every one of those is the same mistake: a name that promises one thing while the contents are
+something else, and in every case the contents themselves were perfectly good data.
 
 The second AI mattered too. The conclusions here went past a different model for adversarial review,
 and several first-pass conclusions did not survive it, including one root cause that a single live
