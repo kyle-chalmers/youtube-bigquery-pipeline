@@ -46,7 +46,7 @@ check "analytics rows with no metadata row for that video" 39 "$(q "
 echo
 echo "Finding 3: gaps in a daily series"
 check "missing activity dates, excluding known zero-activity days" 0 "$(q "
-  WITH cal AS (SELECT d FROM UNNEST(GENERATE_DATE_ARRAY('2025-10-16', DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY))) d),
+  WITH cal AS (SELECT d FROM UNNEST(GENERATE_DATE_ARRAY('2025-10-16', DATE_SUB(CURRENT_DATE('America/Phoenix'), INTERVAL 6 DAY))) d),
   a AS (SELECT DISTINCT activity_date FROM \`$DS.daily_video_analytics\`)
   SELECT COUNTIF(a.activity_date IS NULL AND cal.d NOT IN ('2025-10-22','2025-10-23'))
   FROM cal LEFT JOIN a ON a.activity_date=cal.d")"

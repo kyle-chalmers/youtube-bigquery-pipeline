@@ -21,7 +21,7 @@ echo "1. Snapshot dates in video_metadata (Data API):"
 bq query --use_legacy_sql=false --format=pretty "
 SELECT snapshot_date, COUNT(*) AS video_count
 FROM \`${PROJECT}.${DATASET}.video_metadata\`
-WHERE snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL ${DAYS} DAY)
+WHERE snapshot_date >= DATE_SUB(CURRENT_DATE('America/Phoenix'), INTERVAL ${DAYS} DAY)
 GROUP BY snapshot_date
 ORDER BY snapshot_date DESC
 "
@@ -31,7 +31,7 @@ echo "2. Snapshot dates in daily_video_stats (Data API):"
 bq query --use_legacy_sql=false --format=pretty "
 SELECT snapshot_date, COUNT(*) AS video_count
 FROM \`${PROJECT}.${DATASET}.daily_video_stats\`
-WHERE snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL ${DAYS} DAY)
+WHERE snapshot_date >= DATE_SUB(CURRENT_DATE('America/Phoenix'), INTERVAL ${DAYS} DAY)
 GROUP BY snapshot_date
 ORDER BY snapshot_date DESC
 "
@@ -43,10 +43,15 @@ SELECT 'video_metadata' AS tbl, MAX(snapshot_date) AS latest FROM \`${PROJECT}.$
 UNION ALL
 SELECT 'daily_video_stats', MAX(snapshot_date) FROM \`${PROJECT}.${DATASET}.daily_video_stats\`
 UNION ALL
-SELECT 'daily_video_analytics', MAX(snapshot_date) FROM \`${PROJECT}.${DATASET}.daily_video_analytics\`
+SELECT 'daily_video_analytics', MAX(activity_date) FROM \`${PROJECT}.${DATASET}.daily_video_analytics\`
 UNION ALL
-SELECT 'daily_traffic_sources', MAX(snapshot_date) FROM \`${PROJECT}.${DATASET}.daily_traffic_sources\`
+SELECT 'daily_traffic_sources', MAX(activity_date) FROM \`${PROJECT}.${DATASET}.daily_traffic_sources\`
 ORDER BY latest DESC
+-- The two analytics tables report MAX(activity_date), the day the views happened.
+-- Using MAX(snapshot_date) here made this check useless: snapshot_date is stamped on
+-- every row of every run, so it equals today for as long as ANY row is written and can
+-- never reveal that the Analytics API returned nothing. The two Data API tables above
+-- are genuine daily snapshots and correctly stay on snapshot_date.
 "
 
 echo ""

@@ -65,8 +65,8 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
                 │  │ (Data API)    │ │(Ana. API)│ │ (Ana. API) │  │
                 │  └───────────────┘ └──────────┘ └────────────┘  │
                 │                                                  │
-                │  Join key: (video_id, snapshot_date)             │
-                │  All tables partitioned by snapshot_date         │
+                │  Join key: video_id (see Semantic note below)    │
+                │  Analytics tables: PARTITION BY activity_date    │
                 └──────────────────────────────────────────────────┘
 ```
 
@@ -75,7 +75,7 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 - **[Cloud Scheduler](https://cloud.google.com/scheduler)** triggers the Cloud Function once daily
 - **[Cloud Function](https://cloud.google.com/functions)** calls both YouTube APIs, then writes to 4 BigQuery tables
 - **[Data API](https://developers.google.com/youtube/v3)** (API key) provides video metadata and public stats
-- **[Analytics API](https://developers.google.com/youtube/analytics)** (OAuth2) provides watch time, impressions, traffic sources
+- **[Analytics API](https://developers.google.com/youtube/analytics)** (OAuth2) provides watch time, traffic sources, subscriber changes. Not impressions: those come only from the Reporting API.
 - **[Secret Manager](https://cloud.google.com/secret-manager)** stores OAuth2 credentials so no secrets live in code
 - **[BigQuery](https://cloud.google.com/bigquery)** stores daily snapshots partitioned by date for efficient querying
 - Everything runs within GCP free tier
@@ -150,7 +150,7 @@ Then `source ~/.zshrc` to load them.
 
 ## BigQuery Schema
 
-All tables live in the `youtube_analytics` dataset and are partitioned by `snapshot_date` for cost-efficient querying.
+All tables live in the `youtube_analytics` dataset. `video_metadata` and `daily_video_stats` are partitioned by `snapshot_date`. `daily_video_analytics` and `daily_traffic_sources` are partitioned by `activity_date` and clustered by `video_id`.
 
 **The four tables at a glance:**
 
@@ -163,13 +163,13 @@ All tables live in the `youtube_analytics` dataset and are partitioned by `snaps
 
 **Table relationships (star schema):**
 
-`video_metadata` is the central dimension table. The three fact tables join to it via `video_id` + `snapshot_date`:
+`video_metadata` is the central dimension table. The fact tables join to it via `video_id` alone:
 
 - `video_metadata` → `daily_video_stats` — **1:1** per video per day. Every video gets a stats row on every pipeline run.
 - `video_metadata` → `daily_video_analytics` — **1:1** per video per day. Only videos with activity on the analytics date get rows.
 - `video_metadata` → `daily_traffic_sources` — **1:many** per video per day. One row per traffic source type (e.g., `YT_SEARCH`, `SUGGESTED`, `BROWSE_FEATURES`).
 
-**Semantic note:** `snapshot_date` means different things depending on the source. For Data API tables (`video_metadata`, `daily_video_stats`), it's the date the pipeline ran and values are cumulative totals as of that day. For Analytics API tables (`daily_video_analytics`, `daily_traffic_sources`), it's the analytics date and values represent that single day's activity.
+**Semantic note (rewritten 2026-08-29):** `snapshot_date` used to mean two different things depending on which writer produced the row, and that ambiguity silently double-counted two days and hid three destroyed ones. The analytics tables now carry both columns explicitly: `activity_date` is the day the views happened, `snapshot_date` is the day we collected it. Join and group on `activity_date`. The old note read: For Data API tables (`video_metadata`, `daily_video_stats`), it's the date the pipeline ran and values are cumulative totals as of that day. For Analytics API tables (`daily_video_analytics`, `daily_traffic_sources`), it's the analytics date and values represent that single day's activity.
 
 ### `video_metadata`
 
@@ -207,13 +207,15 @@ Append-only daily snapshots from the YouTube Analytics API v2. These are per-day
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `snapshot_date` | DATE | Date the pipeline ran (partition key) |
+| `activity_date` | DATE | Day the views happened (partition key) |
+| `snapshot_date` | DATE | Day the pipeline collected the row |
+| `load_source` | STRING | Which writer produced it: `cron`, `backfill_YYYYMMDD`, `recovery_YYYYMMDD`, `gap_repair` |
 | `video_id` | STRING | YouTube video ID |
 | `estimated_minutes_watched` | FLOAT64 | Total watch time in minutes across all viewers |
 | `average_view_duration_seconds` | FLOAT64 | How long the average viewer watched before leaving |
 | `average_view_percentage` | FLOAT64 | Percentage of the video the average viewer watched (e.g., 45.0 = 45%) |
-| `impressions` | INT64 | Times YouTube showed the thumbnail (NULL until aggregated from traffic data) |
-| `impression_ctr` | FLOAT64 | Click-through rate on impressions (NULL until aggregated from traffic data) |
+| `impressions` | INT64 | Always NULL. The Analytics API does not expose it; the Reporting API report `channel_reach_basic_a1` does |
+| `impression_ctr` | FLOAT64 | Always NULL. Same reason as `impressions` |
 | `subscribers_gained` | INT64 | Subscriptions gained from this video |
 | `subscribers_lost` | INT64 | Subscriptions lost from this video |
 | `shares` | INT64 | Times the video was shared (share button, copy link, etc.) |
@@ -226,7 +228,9 @@ Append-only from the YouTube Analytics API v2. One row per video per traffic sou
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `snapshot_date` | DATE | Date the pipeline ran (partition key) |
+| `activity_date` | DATE | Day the views happened (partition key) |
+| `snapshot_date` | DATE | Day the pipeline collected the row |
+| `load_source` | STRING | Which writer produced it: `cron`, `backfill_YYYYMMDD`, `recovery_YYYYMMDD`, `gap_repair` |
 | `video_id` | STRING | YouTube video ID |
 | `traffic_source_type` | STRING | How viewers found the video (see values below) |
 | `views` | INT64 | Views from this source on the analytics date |
@@ -381,6 +385,9 @@ Analytics tables show 0 until OAuth2 is configured (Step 3).
 The Analytics API supports historical date ranges, so we backfilled data from the channel's first public video (October 16, 2025) to the present. This gives ~125 days of historical watch time, subscriber impact, and traffic source data.
 
 ```bash
+# The backfill REPLACES whole activity days. It keys its delete on activity_date and
+# refuses to delete when the API returns nothing, but it will still overwrite any day in
+# the range. Check what is there first, and prefer a narrow range.
 python3 setup/backfill_analytics.py --start 2025-10-16 --end 2026-02-17
 ```
 

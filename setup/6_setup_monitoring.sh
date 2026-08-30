@@ -60,7 +60,7 @@ cat > "$POLICY_JSON" <<EOF
 {
   "displayName": "$POLICY_NAME",
   "documentation": {
-    "content": "Analytics half of the YouTube BigQuery pipeline silently failed. Most common cause: the OAuth refresh token expired (the consent screen is in Production/Unverified with a sensitive scope, so tokens live 7 days). See .internal/REFRESH_TOKEN_ROTATION.md for the fix.",
+    "content": "Analytics half of the YouTube BigQuery pipeline wrote 0 rows. Token expiry is NOT the usual cause; the current token has run for months. Check likely causes in order: (1) the Analytics API had no data yet for the queried activity date, which is what happens when the lookback sits near the edge of availability; (2) one metric in the six-metric query hit a backend issue and zeroed the whole response. Fastest triage: check whether daily_traffic_sources got rows for the same activity date. If it did, credentials are fine. The self-healing gap re-query should recover the day within GAP_LOOKBACK_DAYS.",
     "mimeType": "text/markdown"
   },
   "conditions": [

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from google.cloud import bigquery, secretmanager
@@ -73,7 +74,7 @@ def api_call_with_retry(fn, max_retries: int = 5):
         try:
             return fn()
         except HttpError as e:
-            if e.resp.status in (429, 503) and attempt < max_retries:
+            if e.resp.status in (429, 500, 502, 503, 504) and attempt < max_retries:
                 wait = 2 ** attempt
                 logger.warning(f"Rate limited ({e.resp.status}), retrying in {wait}s")
                 time.sleep(wait)
@@ -174,22 +175,39 @@ def fetch_traffic_sources(analytics, video_ids: list[str], query_date: date) -> 
     return all_rows
 
 
-def write_to_bigquery(bq_client: bigquery.Client, table_name: str, rows: list[dict], snapshot_date: date) -> int:
-    """Delete existing rows for the date, then batch insert new ones."""
+def write_to_bigquery(bq_client: bigquery.Client, table_name: str, rows: list[dict],
+                      activity_date: date, run_date: date, load_source: str) -> int:
+    """Replace one activity day, then batch insert.
+
+    Mirrors cloud_function/bigquery_writer._delete_and_insert, and must keep mirroring
+    it. Two properties are load-bearing:
+
+    1. The DELETE keys on activity_date, not snapshot_date. snapshot_date is the day we
+       collected a row, and recovered history shares one collection date: 262 analytics
+       rows carry snapshot_date=2026-08-29. A delete keyed on snapshot_date would erase
+       every one of them in a single statement.
+    2. The DELETE runs only after we know we have rows. Deleting first is what destroyed
+       activity 2026-02-22/23/24 on 2026-05-25.
+    """
     table_ref = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
 
-    # Delete existing
-    delete_query = f"DELETE FROM `{table_ref}` WHERE snapshot_date = @snapshot_date"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("snapshot_date", "DATE", str(snapshot_date))]
-    )
-    bq_client.query(delete_query, job_config=job_config).result()
-
     if not rows:
+        logger.warning(
+            f"  No rows for activity_date={activity_date} in {table_name}; "
+            f"leaving the existing partition untouched"
+        )
         return 0
 
     for row in rows:
-        row["snapshot_date"] = str(snapshot_date)
+        row["activity_date"] = str(activity_date)
+        row["snapshot_date"] = str(run_date)
+        row["load_source"] = load_source
+
+    delete_query = f"DELETE FROM `{table_ref}` WHERE activity_date = @activity_date"
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("activity_date", "DATE", str(activity_date))]
+    )
+    bq_client.query(delete_query, job_config=job_config).result()
 
     json_data = "\n".join(json.dumps(r) for r in rows)
     load_config = bigquery.LoadJobConfig(
@@ -207,13 +225,20 @@ def main():
     parser = argparse.ArgumentParser(description="Backfill YouTube analytics data")
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
+    parser.add_argument("--load-source", dest="load_source", default=None,
+                        help="Provenance tag for the written rows "
+                             "(default: backfill_YYYYMMDD of today)")
     args = parser.parse_args()
 
     start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
     end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
     total_days = (end_date - start_date).days + 1
 
+    run_date = datetime.now(ZoneInfo(os.environ.get("PIPELINE_TZ", "America/Phoenix"))).date()
+    load_source = args.load_source or f"backfill_{run_date:%Y%m%d}"
+
     logger.info(f"Backfilling {total_days} days: {start_date} to {end_date}")
+    logger.info(f"Rows will be tagged load_source={load_source}, snapshot_date={run_date}")
 
     analytics = build_analytics_client()
     bq_client = bigquery.Client(project=PROJECT_ID)
@@ -234,12 +259,14 @@ def main():
 
         # Fetch and write analytics
         analytics_rows = fetch_video_analytics(analytics, current_date, video_ids)
-        a_count = write_to_bigquery(bq_client, "daily_video_analytics", analytics_rows, current_date)
+        a_count = write_to_bigquery(bq_client, "daily_video_analytics", analytics_rows,
+                                    current_date, run_date, load_source)
         total_analytics += a_count
 
         # Fetch and write traffic sources
         traffic_rows = fetch_traffic_sources(analytics, video_ids, current_date)
-        t_count = write_to_bigquery(bq_client, "daily_traffic_sources", traffic_rows, current_date)
+        t_count = write_to_bigquery(bq_client, "daily_traffic_sources", traffic_rows,
+                                    current_date, run_date, load_source)
         total_traffic += t_count
 
         logger.info(f"  → {a_count} analytics rows, {t_count} traffic rows")
