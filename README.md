@@ -4,6 +4,8 @@ Daily automated pipeline that snapshots YouTube analytics into BigQuery for hist
 
 > This project was built live as a YouTube video: **"I Let Claude Code Build My Entire YouTube Analytics Pipeline."** The build prompt (`PROMPT.md`) was created using the [`/taches-cc-resources:create-prompt`](https://github.com/glittercowboy/taches-cc-resources) Claude Code skill. Claude Code then generated a [6-phase implementation plan](prompts/completed/001-youtube-bigquery-pipeline-plan.md) from that prompt.
 
+> **Audited and repaired live in a follow-up video: "I Audited the BigQuery Pipeline Claude Code Built Me. It Was Wrong."** The audit prompt, the standing rules to paste into your own agent, and the five takeaways are in **[AUDITING-YOUR-DATA-WITH-AI.md](AUDITING-YOUR-DATA-WITH-AI.md)**.
+
 OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.github.io/youtube-bigquery-pipeline/), [Privacy Policy](https://kyle-chalmers.github.io/youtube-bigquery-pipeline/privacy.html), and [Terms of Service](https://kyle-chalmers.github.io/youtube-bigquery-pipeline/terms.html).
 
 ---
