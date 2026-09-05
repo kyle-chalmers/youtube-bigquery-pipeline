@@ -8,78 +8,43 @@ Usage:
 """
 
 import argparse
-import io
-import json
 import logging
 import os
-import subprocess
-import sys
 import time
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from google.cloud import bigquery, secretmanager
-from google.oauth2.credentials import Credentials
+from google.cloud import bigquery
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+
+import _bootstrap  # noqa: F401  (adds cloud_function/ to sys.path)
+
+# isort: split   (everything below needs _bootstrap to have run first)
+from bigquery_writer import BigQueryWriter
+from oauth_credentials import load_oauth_credentials
+from retry import with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _gcloud_default_project() -> str | None:
-    """Read the active gcloud default project, if any."""
-    try:
-        result = subprocess.run(
-            ["gcloud", "config", "get-value", "project"],
-            capture_output=True, text=True, check=True, timeout=5,
-        )
-        value = result.stdout.strip()
-        return value if value and value != "(unset)" else None
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
-
-
-PROJECT_ID = os.environ.get("GCP_PROJECT") or _gcloud_default_project()
-if not PROJECT_ID:
-    raise SystemExit("GCP_PROJECT env var not set and no default gcloud project configured. Run `gcloud config set project <id>` or set GCP_PROJECT in your shell.")
+PROJECT_ID = _bootstrap.resolve_project()
 DATASET_ID = os.environ.get("BQ_DATASET", "youtube_analytics")
-TOKEN_URI = "https://oauth2.googleapis.com/token"
-
-
-def get_secret(secret_id: str) -> str:
-    """Read a secret from Secret Manager."""
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/latest"
-    response = client.access_secret_version(request={"name": name})
-    return response.payload.data.decode("utf-8")
+# Retry policy is the shared one (429 and the 5xx family). The attempt count is this
+# script's own decision: 5, one more than the Cloud Function, because a backfill runs
+# hundreds of calls back to back and a lost day here is a manual re-run.
+BACKFILL_MAX_RETRIES = 5
 
 
 def build_analytics_client():
-    """Build YouTube Analytics API client using OAuth credentials from Secret Manager."""
-    credentials = Credentials(
-        token=None,
-        refresh_token=get_secret("youtube-oauth-refresh-token"),
-        client_id=get_secret("youtube-oauth-client-id"),
-        client_secret=get_secret("youtube-oauth-client-secret"),
-        token_uri=TOKEN_URI,
-    )
-    return build("youtubeAnalytics", "v2", credentials=credentials)
+    """Build the YouTube Analytics API client from the shared Secret Manager loader."""
+    return build("youtubeAnalytics", "v2", credentials=load_oauth_credentials(PROJECT_ID))
 
 
-def api_call_with_retry(fn, max_retries: int = 5):
-    """Execute API call with exponential backoff."""
-    for attempt in range(max_retries + 1):
-        try:
-            return fn()
-        except HttpError as e:
-            if e.resp.status in (429, 500, 502, 503, 504) and attempt < max_retries:
-                wait = 2 ** attempt
-                logger.warning(f"Rate limited ({e.resp.status}), retrying in {wait}s")
-                time.sleep(wait)
-            else:
-                raise
+def api_call_with_retry(fn, max_retries: int = BACKFILL_MAX_RETRIES):
+    """Execute an API call with exponential backoff (shared policy, backfill attempt count)."""
+    return with_retry(fn, max_retries=max_retries)
 
 
 # The unfiltered "Top videos" report caps at 200 rows and cannot be paged past it:
@@ -175,50 +140,20 @@ def fetch_traffic_sources(analytics, video_ids: list[str], query_date: date) -> 
     return all_rows
 
 
-def write_to_bigquery(bq_client: bigquery.Client, table_name: str, rows: list[dict],
-                      activity_date: date, run_date: date, load_source: str) -> int:
-    """Replace one activity day, then batch insert.
+def write_rows(writer: BigQueryWriter, table_name: str, rows: list[dict],
+               activity_date: date, run_date: date, load_source: str) -> int:
+    """Replace one activity day through the shared BigQueryWriter.
 
-    Mirrors cloud_function/bigquery_writer._delete_and_insert, and must keep mirroring
-    it. Two properties are load-bearing:
-
-    1. The DELETE keys on activity_date, not snapshot_date. snapshot_date is the day we
-       collected a row, and recovered history shares one collection date: 262 analytics
-       rows carry snapshot_date=2026-08-29. A delete keyed on snapshot_date would erase
-       every one of them in a single statement.
-    2. The DELETE runs only after we know we have rows. Deleting first is what destroyed
-       activity 2026-02-22/23/24 on 2026-05-25.
+    This used to be a hand copy of cloud_function/bigquery_writer._delete_and_insert
+    with a docstring begging future authors to keep the two in sync. The two
+    load-bearing properties (DELETE keyed on activity_date, and only after rows are in
+    hand) now live in exactly one place and are pinned by tests/test_bigquery_writer.py.
     """
-    table_ref = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
-
-    if not rows:
-        logger.warning(
-            f"  No rows for activity_date={activity_date} in {table_name}; "
-            f"leaving the existing partition untouched"
-        )
-        return 0
-
-    for row in rows:
-        row["activity_date"] = str(activity_date)
-        row["snapshot_date"] = str(run_date)
-        row["load_source"] = load_source
-
-    delete_query = f"DELETE FROM `{table_ref}` WHERE activity_date = @activity_date"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("activity_date", "DATE", str(activity_date))]
-    )
-    bq_client.query(delete_query, job_config=job_config).result()
-
-    json_data = "\n".join(json.dumps(r) for r in rows)
-    load_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-    )
-    load_job = bq_client.load_table_from_file(
-        io.BytesIO(json_data.encode()), table_ref, job_config=load_config
-    )
-    load_job.result()
-    return len(rows)
+    if table_name == "daily_video_analytics":
+        return writer.write_daily_video_analytics(rows, run_date, activity_date, load_source)
+    if table_name == "daily_traffic_sources":
+        return writer.write_daily_traffic_sources(rows, run_date, activity_date, load_source)
+    raise ValueError(f"backfill does not write {table_name}")
 
 
 def main():
@@ -242,6 +177,7 @@ def main():
 
     analytics = build_analytics_client()
     bq_client = bigquery.Client(project=PROJECT_ID)
+    writer = BigQueryWriter(project_id=PROJECT_ID, dataset_id=DATASET_ID)
 
     # Get video IDs from the most recent video_metadata snapshot
     query = f"SELECT DISTINCT video_id FROM `{PROJECT_ID}.{DATASET_ID}.video_metadata` WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM `{PROJECT_ID}.{DATASET_ID}.video_metadata`)"
@@ -259,14 +195,14 @@ def main():
 
         # Fetch and write analytics
         analytics_rows = fetch_video_analytics(analytics, current_date, video_ids)
-        a_count = write_to_bigquery(bq_client, "daily_video_analytics", analytics_rows,
-                                    current_date, run_date, load_source)
+        a_count = write_rows(writer, "daily_video_analytics", analytics_rows,
+                             current_date, run_date, load_source)
         total_analytics += a_count
 
         # Fetch and write traffic sources
         traffic_rows = fetch_traffic_sources(analytics, video_ids, current_date)
-        t_count = write_to_bigquery(bq_client, "daily_traffic_sources", traffic_rows,
-                                    current_date, run_date, load_source)
+        t_count = write_rows(writer, "daily_traffic_sources", traffic_rows,
+                             current_date, run_date, load_source)
         total_traffic += t_count
 
         logger.info(f"  → {a_count} analytics rows, {t_count} traffic rows")

@@ -4,3 +4,6 @@ google-cloud-logging==3.*
 google-api-python-client==2.*
 google-auth==2.*
 google-cloud-secret-manager==2.*
+# requests arrives transitively today; pinned so the Reporting download path
+# never depends on another package's dependency list.
+requests==2.*
