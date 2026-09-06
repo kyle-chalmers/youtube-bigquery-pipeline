@@ -19,34 +19,38 @@ data pipeline with an agent doing the work.
 - **Nothing touched production until the staging copy had proven it**, and the promotion ran from a
   written runbook with a stop condition at every step.
 
-## Five things to do on your own pipeline
+## Five data engineering takeaways
 
-1. **Archive the raw source before you write the loader.** Reporting API files expire 60 days after
-   YouTube generates them. The first thing that shipped was a copy of every file to Cloud Storage, keyed by
-   report id, before a line of loader code existed. When the loader later needed a replay, the archive was
-   there. Whatever your source is, if it can expire or be revised, keep the bytes.
+1. **Land the raw source immutably before you transform anything.** Sources expire, get revised, and
+   change shape. Keep the original bytes, keyed by whatever identifies a delivery, so any day can be
+   replayed and any schema change can be re-parsed from the original. Here: every Reporting API file went to
+   Cloud Storage before a line of loader code existed, and that archive later rebuilt production.
 
-2. **Put assertions in front of every delete, inside one transaction.** Rows present, exactly the expected
-   day, the configured channel, unique grain, not already loaded, no newer generation loaded. If any fails,
-   nothing changes, and the ledger row that records the load commits with the data. And decide up front that
-   an empty file never deletes a populated day; this repo once lost three days by trusting an empty response.
+2. **Never mutate a table without asserting first, and do the assert and the mutate in one transaction.**
+   Check that the incoming data is non-empty, covers exactly the slice you are about to replace, belongs to
+   the right owner, is unique on its grain, and is newer than what is there. Write the load record in the same
+   transaction so the table and its bookkeeping cannot disagree. Decide in advance that "empty" is a
+   question for a human, not a delete. Here: six assertions in front of every partition replace, a ledger row
+   committed with the data, and header-only files that alert instead of deleting.
 
-3. **Make verification something you can paste, and something that can fail.** Every phase shipped a SQL
-   file with the expected result written above each query, plus a script that runs them and treats a failed
-   or empty query as a failure. Review found a check that printed PASS when its query errored, and a test
-   whose regex could never match the code it guarded. Test the tests.
+3. **Verification must be runnable by hand and must be able to fail.** Ship the checks as plain SQL with
+   the expected result next to each query, and wrap them in a script that treats a failed or empty query as a
+   failure, never as a pass. Then test the tests: a guard that cannot match the code it guards is decoration.
+   Here: review found a check that printed PASS when its query errored, and a regex test that matched
+   nothing in the views it protected.
 
-4. **Run independent reviewers at every gate, and treat what they say as leads.** A second model and five
-   review agents looked at each phase's diff. They found a header-only day that read as "no report", rolling
-   windows that counted rows instead of days, and a metric that let two errors cancel. Each finding was
-   reproduced before it was fixed, one was recorded as a disagreement, and a reviewer that hit its usage
-   limit was recorded as not having run rather than as an approval.
+4. **Gate every phase with independent review, and treat findings as leads to reproduce.** Reviewers from
+   a different model and specialised agents see what the author cannot. Reproduce each finding before
+   acting, write down disagreements instead of smoothing them over, and record a reviewer that failed to run
+   as exactly that, never as approval. Here: six reviewers per phase found a day that read as missing when
+   it was empty, windows that counted rows instead of days, and a metric that let two errors cancel.
 
-5. **Check three numbers against the source of truth, then read the documentation.** Three videos compared
-   in YouTube Studio showed that "average view duration" is watch time over engaged views, not views, and
-   that YouTube changed what a view means on 2026-08-24 without restating history. YouTube's help pages
-   confirmed both. The raw rows were never wrong; the metric's meaning had moved, so the views now expose
-   every ratio on both denominators and name the stable series.
+5. **Reconcile against the system of record, then read the definitions before you trust the numbers.**
+   Two sources that both look right can disagree by a few percent for documented reasons, and a metric can
+   change meaning under you without history being restated. Keep the raw values, expose ratios on every
+   defensible denominator, and name the series that is stable across the change. Here: a three-video check
+   against YouTube Studio showed average view duration uses engaged views, and that "view" changed meaning
+   on 2026-08-24; both confirmed in YouTube's own documentation.
 
 ## Smaller lessons
 
