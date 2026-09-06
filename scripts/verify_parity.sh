@@ -92,14 +92,18 @@ WITH p AS (SELECT video_id FROM $(T "$PROD" daily_video_stats) WHERE snapshot_da
      s AS (SELECT video_id FROM $(T "$STAGING" daily_video_stats) WHERE snapshot_date='$day')
 SELECT 1 FROM p FULL OUTER JOIN s USING (video_id) WHERE p.video_id IS NULL OR s.video_id IS NULL")
 check "daily_video_stats key sets identical for $day" 0 "$stats_keys"
+# The public counters are read at two different moments and are not monotonic (YouTube
+# removes invalid views; observed 2026-09-06: 9 of 204 videos moved between -2 and +14 in 14
+# minutes). Likes and comments must be identical; view_count may drift by a bounded amount.
 stats_bad=$(count "
 SELECT 1 FROM $(T "$PROD" daily_video_stats) p JOIN $(T "$STAGING" daily_video_stats) s USING (snapshot_date, video_id)
-WHERE p.snapshot_date='$day' AND (s.view_count > p.view_count OR s.like_count > p.like_count OR s.comment_count > p.comment_count)")
-check "daily_video_stats: no staging counter exceeds prod (staging ran earlier in the day)" 0 "$stats_bad"
+WHERE p.snapshot_date='$day' AND (s.like_count != p.like_count OR s.comment_count != p.comment_count
+   OR ABS(s.view_count - p.view_count) > GREATEST(25, 0.005 * p.view_count))")
+check "daily_video_stats: likes and comments identical, view_count within max(25, 0.5%) (counters read minutes apart)" 0 "$stats_bad"
 drift=$(scalar "
-SELECT IFNULL(MAX(p.view_count - s.view_count), 0) FROM $(T "$PROD" daily_video_stats) p JOIN $(T "$STAGING" daily_video_stats) s USING (snapshot_date, video_id)
+SELECT IFNULL(MAX(ABS(p.view_count - s.view_count)), 0) FROM $(T "$PROD" daily_video_stats) p JOIN $(T "$STAGING" daily_video_stats) s USING (snapshot_date, video_id)
 WHERE p.snapshot_date='$day'")
-echo "INFO  max view_count drift prod - staging on $day: $drift (intraday growth, expected small and >= 0)"
+echo "INFO  max view_count drift between the two reads on $day: $drift (public counter movement, expected small)"
 
 # Analytics-side comparison keyed on the activity date staging wrote on that snapshot day,
 # per table, so a zero-row analytics day does not hide the traffic comparison.
