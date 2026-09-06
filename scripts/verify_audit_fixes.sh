@@ -51,7 +51,7 @@ check "missing activity dates, excluding known zero-activity days" 0 "$(q "
   SELECT COUNTIF(a.activity_date IS NULL AND cal.d NOT IN ('2025-10-22','2025-10-23'))
   FROM cal LEFT JOIN a ON a.activity_date=cal.d")"
 # Bound on the Phoenix date, not UTC. snapshot_date is now stamped in Phoenix local
-# time, and today's 23:50 run has not fired yet, so today is legitimately absent.
+# time, and today's 00:10 run may not have fired yet, so today is legitimately absent.
 # Using CURRENT_DATE() here reported a phantom gap: the same UTC-vs-local confusion
 # this audit was about, reproduced inside its own regression check.
 check "daily_video_stats snapshot gaps since 2026-08-15" 0 "$(q "

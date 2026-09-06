@@ -1,4 +1,7 @@
 -- YouTube BigQuery Pipeline — Table DDL
+-- ${BQ_DATASET} is substituted by setup/2_create_bigquery.sh, so the same file creates
+-- youtube_analytics in prod and youtube_analytics_staging for rehearsal.
+-- To run by hand: sed 's/${BQ_DATASET}/youtube_analytics/g' sql/create_tables.sql | bq query --use_legacy_sql=false
 -- Partitioning differs by table, on purpose:
 --   video_metadata, daily_video_stats     PARTITION BY snapshot_date (true daily snapshots)
 --   daily_video_analytics, daily_traffic_sources
@@ -8,7 +11,7 @@
 -- "the day we collected this", which can be months after activity_date for recovered rows.
 
 -- Video metadata (slowly changing dimension — updated daily)
-CREATE TABLE IF NOT EXISTS `youtube_analytics.video_metadata` (
+CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.video_metadata` (
     video_id STRING NOT NULL,
     title STRING,
     published_at TIMESTAMP,
@@ -26,7 +29,7 @@ OPTIONS (
 );
 
 -- Daily video stats from Data API v3 (append-only)
-CREATE TABLE IF NOT EXISTS `youtube_analytics.daily_video_stats` (
+CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.daily_video_stats` (
     snapshot_date DATE NOT NULL,
     video_id STRING NOT NULL,
     view_count INT64,
@@ -43,7 +46,7 @@ OPTIONS (
 -- activity_date is the day the views happened; snapshot_date is the day the
 -- pipeline collected them. They differ by ANALYTICS_LOOKBACK_DAYS on a normal run
 -- and by months on a recovered row. Idempotent writes key on activity_date.
-CREATE TABLE IF NOT EXISTS `youtube_analytics.daily_video_analytics` (
+CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.daily_video_analytics` (
     activity_date DATE NOT NULL,
     snapshot_date DATE NOT NULL,
     video_id STRING NOT NULL,
@@ -67,7 +70,7 @@ OPTIONS (
 
 -- Daily traffic sources from Analytics API v2. See daily_video_analytics above
 -- for the activity_date / snapshot_date distinction.
-CREATE TABLE IF NOT EXISTS `youtube_analytics.daily_traffic_sources` (
+CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.daily_traffic_sources` (
     activity_date DATE NOT NULL,
     snapshot_date DATE NOT NULL,
     video_id STRING NOT NULL,

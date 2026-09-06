@@ -1,23 +1,19 @@
 """YouTube Analytics API v2 client for fetching watch time, engagement, and traffic data."""
 
 import logging
-import time
 from datetime import date
 from typing import Any
 
-from google.cloud import secretmanager
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from log_safety import redact
+from oauth_credentials import load_oauth_credentials
+from retry import RETRYABLE_STATUSES as _SHARED_RETRYABLE
+from retry import with_retry
+
 logger = logging.getLogger(__name__)
 
-# Secret Manager secret names
-SECRET_CLIENT_ID = "youtube-oauth-client-id"
-SECRET_CLIENT_SECRET = "youtube-oauth-client-secret"
-SECRET_REFRESH_TOKEN = "youtube-oauth-refresh-token"
-
-TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 # The unfiltered video query is the "Top videos" report, which is a capped top-N
 # report rather than a paginated list. From the report spec at
@@ -57,7 +53,6 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 RESULT_CAP = 200
 SHARD_SIZE = 100
 MAX_FILTER_IDS = 500
-SCOPES = ["https://www.googleapis.com/auth/yt-analytics.readonly"]
 
 
 class YouTubeAnalyticsAPI:
@@ -69,46 +64,8 @@ class YouTubeAnalyticsAPI:
         Args:
             project_id: GCP project ID for Secret Manager access.
         """
-        credentials = self._load_credentials(project_id)
+        credentials = load_oauth_credentials(project_id)
         self.analytics = build("youtubeAnalytics", "v2", credentials=credentials)
-
-    def _load_credentials(self, project_id: str) -> Credentials:
-        """Load OAuth2 credentials from Secret Manager.
-
-        Args:
-            project_id: GCP project ID.
-
-        Returns:
-            Credentials instance that auto-refreshes using the stored refresh token.
-        """
-        client_id = self._get_secret(project_id, SECRET_CLIENT_ID)
-        client_secret = self._get_secret(project_id, SECRET_CLIENT_SECRET)
-        refresh_token = self._get_secret(project_id, SECRET_REFRESH_TOKEN)
-
-        return Credentials(
-            token=None,
-            refresh_token=refresh_token,
-            client_id=client_id,
-            client_secret=client_secret,
-            token_uri=TOKEN_URI,
-            scopes=SCOPES,
-        )
-
-    @staticmethod
-    def _get_secret(project_id: str, secret_id: str) -> str:
-        """Read a secret value from Secret Manager.
-
-        Args:
-            project_id: GCP project ID.
-            secret_id: Name of the secret.
-
-        Returns:
-            Secret value as string.
-        """
-        client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
-        response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("utf-8")
 
     # An empty response here has more than one cause, and they are not distinguishable
     # from the response itself. A Google engineer enumerated them on
@@ -144,7 +101,7 @@ class YouTubeAnalyticsAPI:
         try:
             api_rows = self._fetch_video_rows(video_ids, date_str)
         except Exception as e:
-            logger.error(f"Analytics API query failed: {e}")
+            logger.error(f"Analytics API query failed: {redact(str(e))}")
             return [], [f"Analytics query failed: {str(e)}"]
 
         # Parse response rows
@@ -225,7 +182,7 @@ class YouTubeAnalyticsAPI:
                     )
 
             except Exception as e:
-                logger.warning(f"Traffic sources failed for {video_id}: {e}")
+                logger.warning(f"Traffic sources failed for {video_id}: {redact(str(e))}")
                 errors.append(f"{video_id}: {str(e)}")
 
         logger.info(
@@ -237,7 +194,7 @@ class YouTubeAnalyticsAPI:
     # worth retrying. Retrying only 429 silently dropped a video's traffic on the
     # first HTTP 500, which is how two videos went missing during the 2026-08-29
     # recovery until the retry was widened.
-    RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+    RETRYABLE_STATUSES = _SHARED_RETRYABLE
 
     METRICS = (
         "estimatedMinutesWatched,averageViewDuration,averageViewPercentage,"
@@ -311,30 +268,8 @@ class YouTubeAnalyticsAPI:
     ) -> dict[str, Any]:
         """Execute an API call with exponential backoff on transient failures.
 
-        Args:
-            callable_fn: Zero-argument callable that executes the API call.
-            max_retries: Maximum number of retry attempts.
-
-        Returns:
-            API response dict.
-
-        Raises:
-            HttpError: If the call fails after all retries.
+        Delegates to the shared with_retry so the Analytics and Reporting clients and
+        the backfill script cannot drift apart on which statuses are retried. The
+        attempt count stays a caller decision: the Cloud Function uses 3.
         """
-        for attempt in range(max_retries + 1):
-            try:
-                return callable_fn()
-            except HttpError as e:
-                if (
-                    e.resp.status in YouTubeAnalyticsAPI.RETRYABLE_STATUSES
-                    and attempt < max_retries
-                ):
-                    wait = 2**attempt
-                    logger.warning(
-                        f"HTTP {e.resp.status}, retrying in {wait}s "
-                        f"(attempt {attempt + 1}/{max_retries})"
-                    )
-                    time.sleep(wait)
-                else:
-                    raise
-        raise RuntimeError("Unreachable")
+        return with_retry(callable_fn, max_retries=max_retries)

@@ -64,4 +64,4 @@ gcloud logging read \
   --project="${PROJECT}" 2>/dev/null || echo "Run: gcloud auth login (and application-default login) if this fails."
 
 echo ""
-echo "Done. Expect one snapshot_date per calendar day for video_metadata/daily_video_stats (scheduler runs ~11:50 PM Phoenix)."
+echo "Done. Expect one snapshot_date per calendar day for video_metadata/daily_video_stats (scheduler runs 00:10 Phoenix)."

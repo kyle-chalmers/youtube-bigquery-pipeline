@@ -1,0 +1,4 @@
+# Local development and CI. Runtime dependencies live in cloud_function/requirements.txt.
+-r cloud_function/requirements.txt
+google-cloud-storage==3.*
+pytest==8.*

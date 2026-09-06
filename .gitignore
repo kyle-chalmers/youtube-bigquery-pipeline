@@ -51,3 +51,6 @@ Thumbs.db
 # Local multi-AI review artifacts (not for the public repo)
 .ai-friend-review/
 .claude/settings.local.json.bak
+
+# Session handoff prompts (next-session-prompt skill); prompts/completed/ stays tracked
+prompts/*.md

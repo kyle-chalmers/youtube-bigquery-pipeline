@@ -1,0 +1,22 @@
+name: tests
+
+# Offline unit tests only. Nothing here has credentials, and nothing here can reach
+# BigQuery, Secret Manager, or YouTube. Integration checks run against the staging
+# dataset from a developer machine via scripts/verify_*.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # matches the Cloud Functions runtime
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/ -q

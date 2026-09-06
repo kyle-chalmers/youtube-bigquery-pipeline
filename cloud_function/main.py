@@ -6,6 +6,7 @@ Triggered by Cloud Scheduler via HTTP.
 
 import logging
 import os
+import traceback
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -14,6 +15,7 @@ from zoneinfo import ZoneInfo
 import functions_framework
 
 from bigquery_writer import BigQueryWriter
+from log_safety import redact
 from youtube_data_api import YouTubeDataAPI
 
 # ─── Structured Logging Setup ────────────────────────────────────
@@ -41,7 +43,7 @@ UPLOADS_PLAYLIST_ID = os.environ.get(
     "UPLOADS_PLAYLIST_ID", "UU" + CHANNEL_ID[2:] if CHANNEL_ID.startswith("UC") else ""
 )
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-# Cloud Run is UTC. The scheduler fires at 23:50 America/Phoenix, which is already
+# Cloud Run is UTC. The scheduler fired at 23:50 America/Phoenix (00:10 since 2026-09-05), which is already
 # the next day in UTC, so date.today() stamped every row one day ahead of the local
 # day it summarised. Stamp the local day instead.
 PIPELINE_TZ = ZoneInfo(os.environ.get("PIPELINE_TZ", "America/Phoenix"))
@@ -88,8 +90,10 @@ def main(request) -> tuple[dict, int]:
         return result, 200
 
     except Exception as e:
-        log.exception(f"Pipeline failed — {e}")
-        return {"error": str(e)}, 500
+        # Not log.exception: the traceback and the message carry the request URL, which
+        # for the Data API includes the API key. Both are redacted before logging.
+        log.error(f"Pipeline failed — {redact(str(e))}\n{redact(traceback.format_exc())}")
+        return {"error": redact(str(e))}, 500
 
 
 def run_pipeline(snapshot_date: date, log: logging.LoggerAdapter) -> dict:
@@ -151,7 +155,7 @@ def run_pipeline(snapshot_date: date, log: logging.LoggerAdapter) -> dict:
     except ImportError:
         log.info("Analytics API module not available — skipping")
     except Exception as e:
-        log.warning(f"Analytics API failed entirely: {e}")
+        log.warning(f"Analytics API failed entirely: {redact(str(e))}")
         analytics_errors.append(f"Analytics API: {str(e)}")
 
     # Build summary
@@ -240,7 +244,7 @@ def _repair_gaps(
             "daily_video_analytics", earliest, analytics_date, MAX_GAP_REPAIRS_PER_RUN
         )
     except Exception as e:
-        logger.warning(f"Gap detection failed, skipping repair: {e}")
+        logger.warning(f"Gap detection failed, skipping repair: {redact(str(e))}")
         return []
 
     repaired: list[str] = []

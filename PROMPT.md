@@ -6,8 +6,8 @@ This pipeline will provide historical trend data for Kyle's YouTube channel (KC 
 
 <context>
 <channel_details>
-- Channel ID: UCkRi29nXFxNBuPhjseoB6AQ
-- Uploads Playlist: UUkRi29nXFxNBuPhjseoB6AQ
+- Channel ID: <YOUR_CHANNEL_ID>
+- Uploads Playlist: <YOUR_UPLOADS_PLAYLIST_ID>
 - 63 total videos (mix of full-length and shorts), growing over time
 - YOUTUBE_API_KEY is set in ~/.zshrc for the Data API v3 (source it if not in env)
 - The Analytics API requires OAuth2 (not just an API key) — this will need to be set up
@@ -49,7 +49,7 @@ Before writing any code, thoroughly investigate the current GCP setup and API re
 3. Check if BigQuery dataset `youtube_analytics` already exists: `bq ls`
 4. Check existing Cloud Functions: `gcloud functions list`
 5. Check existing Cloud Scheduler jobs: `gcloud scheduler jobs list`
-6. Verify the YouTube API key works: `source ~/.zshrc && curl -s "https://www.googleapis.com/youtube/v3/channels?part=snippet&id=UCkRi29nXFxNBuPhjseoB6AQ&key=$YOUTUBE_API_KEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('items',[{}])[0].get('snippet',{}).get('title','ERROR'))"`
+6. Verify the YouTube API key works: `source ~/.zshrc && curl -s "https://www.googleapis.com/youtube/v3/channels?part=snippet&id=<YOUR_CHANNEL_ID>&key=$YOUTUBE_API_KEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('items',[{}])[0].get('snippet',{}).get('title','ERROR'))"`
 7. Check if OAuth2 credentials exist for the Analytics API, or if they need to be created
 </research>
 
