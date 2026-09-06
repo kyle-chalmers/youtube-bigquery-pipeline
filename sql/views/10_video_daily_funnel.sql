@@ -17,17 +17,25 @@
 --     Studio shows as "Average view duration" for long-form AND Shorts (Studio spot-check
 --     2026-09-02, four videos: Studio 2:44 / 5:31 / 1:31 / 0:18 vs this column 168 / 332 / 93 /
 --     20 s; the views-denominator column gave 64 / 222 / 53 / 10 s, so it is NOT Studio's number).
---   avg_view_duration_over_views_seconds = watch_time_minutes * 60 / views, kept because the
---     Reporting API's own per-row average_view_duration_seconds follows THIS definition on
---     full-length videos (96% of single-segment days within 1 s) and because the source
---     reports 0 whenever engaged_views = 0 even with positive watch time.
+--   avg_view_duration_over_views_seconds = watch_time_minutes * 60 / views, kept for the
+--     pre-2026-08-24 history: until YouTube unified view counting on 2026-08-24 (views count
+--     from the first frame for every format), long-form views and engaged views were the same
+--     number on this channel (ratio 0.998), so both definitions coincided and the source's own
+--     per-row average_view_duration_seconds matched either. From 2026-08-24 the source column
+--     matches neither within 1 s on about a third of rows, and it reports 0 whenever
+--     engaged_views = 0 even with positive watch time. Studio's definition is the one above.
+--     Sources: support.google.com/youtube/answer/12220281 ("calculated from engaged views"),
+--     blog.youtube/inside-youtube/engaged-views-youtube-explained (2026-08-24 unification),
+--     developers.google.com/youtube/analytics/revision_history (2026-08-27 entry).
 --   avg_view_percentage = avg_view_duration_over_views_seconds / duration_seconds * 100 (the
 --     source's own scale, not Studio's "average percentage viewed"); can exceed
 --     100 on looped playback of any video type (observed up to 497 on a full-length video),
 --     exactly as in the source.
---   engaged_start_share = engaged_views / views. Since 2025-03-31 a Shorts `view` counts any
---     start or replay; engaged_views counts playback past the first frame. A hook-quality
---     proxy, NOT YouTube Studio's "swiped away" figure.
+--   engaged_start_share = engaged_views / views. Since 2025-03-31 for Shorts and 2026-08-24
+--     for every format, a `view` counts from the first frame (start, replay, autoplay, hover);
+--     engaged_views counts viewers who clicked to watch or stayed past the initial seconds. A
+--     hook-quality proxy for long-form too now, NOT Studio's "swiped away" figure. On this
+--     channel long-form engaged/view fell from 0.998 to 0.64 at the 2026-08-24 change.
 --   subscribers_* here are the VIDEO-attributed rows only; channel-level subscriber rows
 --     (NULL video_id) are in video_audience_growth and channel_daily_summary.
 -- Sources: reporting_channel_reach_basic_a1, reporting_channel_basic_a3, reporting_ingest_ledger

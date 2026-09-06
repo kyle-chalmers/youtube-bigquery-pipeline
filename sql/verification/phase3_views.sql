@@ -74,27 +74,32 @@ FROM `youtube_analytics.video_daily_funnel`;
 -- ---------------------------------------------------------------------------
 -- --avd_recompute_check
 -- On video-days where the source has a single segment row, compare the view's two AVD columns
--- against the source's own per-row average_view_duration_seconds, by video type. Observed
--- 2026-09-05: the SOURCE column follows watch_time/views on full-length (96% within 1 s) and
--- neither denominator cleanly on Shorts (source reports 0 when engaged_views = 0). YouTube
--- STUDIO, checked the same day, shows watch_time/engaged_views for both, so the view's
--- avg_view_duration_seconds is the engaged-view definition and the views-denominator column is
--- kept as avg_view_duration_over_views_seconds for reconciling to the raw table.
--- Expected: full_length match_share_over_views >= 0.90. Shorts rows are informational.
+-- against the source's own per-row average_view_duration_seconds, by video type and by period.
+-- YouTube unified view counting on 2026-08-24 (views count from the first frame for every
+-- format; engaged views keep the old definition; Studio's AVD is watch time over engaged views,
+-- per support.google.com/youtube/answer/12220281). Observed 2026-09-05: before 08-24 long-form
+-- views and engaged views were identical on this channel (ratio 0.998), so the source column
+-- matched BOTH denominators (1.00 / 0.997); from 08-24 the ratio is 0.64 and the source column
+-- matches neither within 1 s on about a third of rows. Shorts never matched cleanly (source
+-- reports 0 when engaged_views = 0).
+-- Expected: the full_length / before row has match_share_over_engaged >= 0.95 (a fixed cohort
+-- that cannot decay). Every other row is informational.
 -- ---------------------------------------------------------------------------
 WITH single AS (
   SELECT b.report_date, b.video_id, IFNULL(v.video_type, 'unknown') AS video_type,
-         ANY_VALUE(b.average_view_duration_seconds) AS src_avd
+         ANY_VALUE(b.average_view_duration_seconds) AS src_avd, SUM(b.views) AS views, SUM(b.engaged_views) AS engaged_views
   FROM `youtube_analytics.reporting_channel_basic_a3` b
   LEFT JOIN `youtube_analytics.video_current` v USING (video_id)
   WHERE b.video_id IS NOT NULL AND b.views > 0
   GROUP BY 1, 2, 3 HAVING COUNT(*) = 1
 )
-SELECT s.video_type, COUNT(*) AS single_segment_video_days,
+SELECT s.video_type, IF(s.report_date >= '2026-08-24', 'from_2026-08-24', 'before') AS period,
+       COUNT(*) AS single_segment_video_days,
+       ROUND(SUM(s.engaged_views) / SUM(s.views), 3) AS engaged_per_view,
        ROUND(COUNTIF(ABS(f.avg_view_duration_over_views_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_over_views,
-       ROUND(COUNTIF(ABS(f.avg_view_duration_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_engaged
+       ROUND(COUNTIF(ABS(f.avg_view_duration_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_over_engaged
 FROM single s JOIN `youtube_analytics.video_daily_funnel` f USING (report_date, video_id)
-GROUP BY 1 ORDER BY 1;
+GROUP BY 1, 2 ORDER BY 1, 2;
 
 -- ---------------------------------------------------------------------------
 -- --summary_reconciles_to_sources

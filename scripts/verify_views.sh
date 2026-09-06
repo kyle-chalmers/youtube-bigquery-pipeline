@@ -52,9 +52,9 @@ check "clicks are exact (impressions * ctr rounding error below 1e-6)" yes "$(nu
 check "funnel clicks equal ROUND(impressions * ctr) on every row" 0 "$(col "$h" "$r" clicks_formula_mismatch)"
 
 avd=$(q "$(block avd_recompute_check)")
-echo "INFO  avd recompute by video type (share of single-segment video-days within 1 s of the source):"; echo "$avd" | sed 's/^/      /'
-fl=$(echo "$avd" | awk -F, '$1=="full_length"{print $3}')
-check "full-length AVD over views reproduces the source column on >= 90% of single-segment days" yes "$(num_ge "$fl" 0.90)"
+echo "INFO  avd recompute by video type and period (share of single-segment video-days within 1 s of the source column):"; echo "$avd" | sed 's/^/      /'
+fl=$(echo "$avd" | awk -F, '$1=="full_length" && $2=="before"{print $6}')
+check "full-length AVD before 2026-08-24 (views = engaged views) reproduces the source column on >= 95% of days" yes "$(num_ge "$fl" 0.95)"
 
 rec=$(q "$(block summary_reconciles_to_sources)"); h=$(echo "$rec" | head -1); r=$(echo "$rec" | tail -1)
 echo "INFO  summary vs sources: $r"
