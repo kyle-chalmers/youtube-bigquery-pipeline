@@ -8,6 +8,12 @@
 -- video-day (1:1), then LEFT JOIN video_current (n:1). Row count = distinct (day, video)
 -- across both sources; asserted by phase3_views.sql --grain_checks and --no_fanout.
 -- Timezone: report_date is a Pacific-time day (same as activity_date elsewhere).
+-- READING VIEWS ACROSS 2026-08-24: YouTube changed what a `view` is on that date for every
+--   format (from the first frame, including autoplay and hover). History is not restated, so
+--   any views-based series steps up at 08-24 (this channel: +36% views per day while engaged
+--   views fell 13%). engaged_views is the definition-stable series (it IS the old `view` for
+--   long-form, and the old Shorts view since 2025-03-31); every ratio here is exposed on both
+--   denominators so the engaged one can be used for trends that cross the boundary.
 -- Denominators and formulas (ratios are never summed, always recomputed from totals):
 --   clicks = ROUND(impressions * ctr); ctr is a 0..1 fraction; clicks are NOT views (views
 --     include traffic that had no impression, e.g. external links, search suggestions). The
@@ -67,7 +73,8 @@ activity AS (
          SUM(watch_time_minutes) AS watch_time_minutes,
          SUM(likes) AS likes, SUM(comments) AS comments, SUM(shares) AS shares,
          SUM(subscribers_gained) AS subscribers_gained, SUM(subscribers_lost) AS subscribers_lost,
-         SUM(IF(subscribed_status = 'not_subscribed', views, 0)) AS views_from_non_subscribers
+         SUM(IF(subscribed_status = 'not_subscribed', views, 0)) AS views_from_non_subscribers,
+         SUM(IF(subscribed_status = 'not_subscribed', engaged_views, 0)) AS engaged_views_from_non_subscribers
   FROM `${BQ_DATASET}.reporting_channel_basic_a3`
   WHERE video_id IS NOT NULL
   GROUP BY 1, 2
@@ -85,13 +92,15 @@ SELECT k.report_date, k.video_id,
        SAFE_DIVIDE(a.watch_time_minutes * 60, a.views) / NULLIF(v.duration_seconds, 0) * 100 AS avg_view_percentage,
        SAFE_DIVIDE(a.engaged_views, a.views) AS engaged_start_share,
        SAFE_DIVIDE(a.views_from_non_subscribers, a.views) AS non_subscriber_view_share,
+       SAFE_DIVIDE(a.engaged_views_from_non_subscribers, a.engaged_views) AS non_subscriber_engaged_share,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.likes) AS likes,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.comments) AS comments,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.shares) AS shares,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.subscribers_gained) AS subscribers_gained,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.subscribers_lost) AS subscribers_lost,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.subscribers_gained - a.subscribers_lost) AS net_subscribers,
-       SAFE_DIVIDE(a.subscribers_gained, a.views) * 1000 AS subscribers_gained_per_1k_views
+       SAFE_DIVIDE(a.subscribers_gained, a.views) * 1000 AS subscribers_gained_per_1k_views,
+       SAFE_DIVIDE(a.subscribers_gained, a.engaged_views) * 1000 AS subscribers_gained_per_1k_engaged_views
 FROM (SELECT report_date, video_id FROM reach UNION DISTINCT SELECT report_date, video_id FROM activity) k
 LEFT JOIN reach r USING (report_date, video_id)
 LEFT JOIN activity a USING (report_date, video_id)

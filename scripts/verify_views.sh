@@ -73,6 +73,7 @@ check "the traffic code check saw rows" yes "$(num_lt 0 "$(col "$h" "$r" rows_ch
 ns=$(q "$(block non_subscriber_split)"); h=$(echo "$ns" | head -1); r=$(echo "$ns" | tail -1)
 echo "INFO  non-subscriber split: $r"
 check "subscribed_status literals are the ones the views hardcode" "not_subscribed|subscribed" "$(col "$h" "$r" literals)"
+check "non-subscriber engaged views are a live number (0 < share < 1)" yes "$( [[ "$(num_lt 0 "$(col "$h" "$r" non_subscriber_engaged_views)")" == yes && "$(num_lt "$(col "$h" "$r" non_subscriber_engaged_views)" "$(col "$h" "$r" engaged_views)")" == yes ]] && echo yes || echo no)"
 check "non-subscriber views are a live number (0 < share < 1)" yes "$( [[ "$(num_lt 0 "$(col "$h" "$r" non_subscriber_views)")" == yes && "$(num_lt "$(col "$h" "$r" non_subscriber_views)" "$(col "$h" "$r" views)")" == yes ]] && echo yes || echo no)"
 
 rw=$(q "$(block rolling_windows)"); h=$(echo "$rw" | head -1); r=$(echo "$rw" | tail -1)

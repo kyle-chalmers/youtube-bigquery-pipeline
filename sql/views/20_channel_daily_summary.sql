@@ -17,6 +17,9 @@
 -- days_in_28d say how many days actually fed each sum so a partial window is visible.
 -- shorts_views + long_form_views + unclassified_views = views; unclassified_views are views
 -- on videos absent from the latest metadata snapshot (deleted, private, or unlisted).
+-- views and every views-based column step up at 2026-08-24 (YouTube's view-definition change,
+-- history not restated); engaged_views, engaged_views_7d / _28d and the *_engaged_share columns
+-- are the definition-stable series for trends that cross that date.
 -- Sources: reporting_channel_basic_a3, reporting_channel_reach_basic_a1, reporting_ingest_ledger
 -- (day existence only), video_current.
 CREATE OR REPLACE VIEW `${BQ_DATASET}.channel_daily_summary` AS
@@ -24,6 +27,7 @@ WITH per_video AS (
   SELECT report_date, video_id,
          SUM(views) AS views, SUM(engaged_views) AS engaged_views, SUM(watch_time_minutes) AS watch_time_minutes,
          SUM(IF(subscribed_status = 'not_subscribed', views, 0)) AS views_from_non_subscribers,
+         SUM(IF(subscribed_status = 'not_subscribed', engaged_views, 0)) AS engaged_views_from_non_subscribers,
          SUM(subscribers_gained) AS subscribers_gained, SUM(subscribers_lost) AS subscribers_lost,
          SUM(likes) AS likes, SUM(comments) AS comments, SUM(shares) AS shares
   FROM `${BQ_DATASET}.reporting_channel_basic_a3`
@@ -37,6 +41,7 @@ act AS (
          SUM(IF(v.video_type = 'full_length', p.watch_time_minutes, 0)) AS long_form_watch_time_minutes,
          SUM(IF(v.video_id IS NULL, p.views, 0)) AS unclassified_views,
          SUM(p.views_from_non_subscribers) AS views_from_non_subscribers,
+         SUM(p.engaged_views_from_non_subscribers) AS engaged_views_from_non_subscribers,
          SUM(p.subscribers_gained) AS subscribers_gained, SUM(p.subscribers_lost) AS subscribers_lost,
          SUM(IF(p.video_id IS NULL, p.subscribers_gained, 0)) AS subscribers_gained_channel_level,
          SUM(p.likes) AS likes, SUM(p.comments) AS comments, SUM(p.shares) AS shares,
@@ -73,6 +78,7 @@ d AS (
          IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.long_form_watch_time_minutes) AS long_form_watch_time_minutes,
          IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.unclassified_views) AS unclassified_views,
          IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.views_from_non_subscribers) AS views_from_non_subscribers,
+         IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.engaged_views_from_non_subscribers) AS engaged_views_from_non_subscribers,
          IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.subscribers_gained) AS subscribers_gained,
          IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.subscribers_lost) AS subscribers_lost,
          IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.subscribers_gained_channel_level) AS subscribers_gained_channel_level,
@@ -92,11 +98,14 @@ d AS (
 SELECT *,
        subscribers_gained - subscribers_lost AS net_subscribers,
        SAFE_DIVIDE(views_from_non_subscribers, views) AS non_subscriber_view_share,
+       SAFE_DIVIDE(engaged_views_from_non_subscribers, engaged_views) AS non_subscriber_engaged_share,
        SAFE_DIVIDE(engaged_views, views) AS engaged_start_share,
        SUM(views) OVER w7 AS views_7d,
        COUNT(views) OVER w7 AS days_in_7d,
        SUM(views) OVER w28 AS views_28d,
        COUNT(views) OVER w28 AS days_in_28d,
+       SUM(engaged_views) OVER w7 AS engaged_views_7d,
+       SUM(engaged_views) OVER w28 AS engaged_views_28d,
        SUM(watch_time_minutes) OVER w28 / 60 AS watch_hours_28d,
        SUM(subscribers_gained - subscribers_lost) OVER w28 AS net_subscribers_28d,
        SUM(impressions) OVER w28 AS impressions_28d,

@@ -141,7 +141,8 @@ FROM (SELECT 'detail' AS src, traffic_source_type, traffic_source_name FROM `you
 -- 0 < non_subscriber_views < views.
 -- ---------------------------------------------------------------------------
 SELECT (SELECT STRING_AGG(DISTINCT subscribed_status, '|' ORDER BY subscribed_status) FROM `youtube_analytics.reporting_channel_basic_a3`) AS literals,
-       SUM(views_from_non_subscribers) AS non_subscriber_views, SUM(views) AS views
+       SUM(views_from_non_subscribers) AS non_subscriber_views, SUM(views) AS views,
+       SUM(engaged_views_from_non_subscribers) AS non_subscriber_engaged_views, SUM(engaged_views) AS engaged_views
 FROM `youtube_analytics.channel_daily_summary`;
 
 -- ---------------------------------------------------------------------------
