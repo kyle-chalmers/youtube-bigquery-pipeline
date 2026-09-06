@@ -33,7 +33,7 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 │     API v2          │     └──────────────┬───────────────────┘
 │                     │                    │
 │  • Watch time       │                    │ Reads secrets
-│  • Impressions/CTR  │                    │ at runtime
+│  • Subscriber gains │                    │ at runtime
 │  • Traffic sources  │     ┌──────────────┴───────────────────┐
 │  (OAuth2 auth)      │     │      Secret Manager              │
 └─────────────────────┘     │  (OAuth2 refresh token,          │
@@ -67,13 +67,34 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
                 │                                                  │
                 │  Join key: video_id (see Semantic note below)    │
                 │  Analytics tables: PARTITION BY activity_date    │
+                │                                                  │
+                │  reporting_* (19 raw tables, one per report type)│
+                │  + reporting_ingest_ledger                       │
+                │  PARTITION BY report_date, written by the second │
+                │  function below, never by the daily pipeline     │
                 └──────────────────────────────────────────────────┘
+
+                ┌──────────────────────────────────┐
+                │  Cloud Scheduler (08:00 + 14:00) │
+                └────────────────┬─────────────────┘
+                                 ▼
+┌─────────────────────┐   ┌──────────────────────────────────┐   ┌──────────────────────┐
+│ YouTube Reporting   │──▶│  Cloud Function                  │──▶│  Cloud Storage       │
+│     API v1          │   │  youtube-reporting-ingest        │   │  raw report archive  │
+│  • Impressions/CTR  │   │  1. List every retained report   │   │  (every CSV, forever)│
+│  • Per-video daily  │   │  2. Newest generation per day    │   └──────────────────────┘
+│    activity, traffic│   │  3. Archive, parse by header     │
+│    detail, devices, │   │  4. One transaction per day:     │
+│    demographics ... │   │     assert, replace, ledger      │
+│  (same OAuth2 token)│   └──────────────────────────────────┘
+└─────────────────────┘
 ```
 
 **Data flow summary:**
 
 - **[Cloud Scheduler](https://cloud.google.com/scheduler)** triggers the Cloud Function once daily
-- **[Cloud Function](https://cloud.google.com/functions)** calls both YouTube APIs, then writes to 4 BigQuery tables
+- **[Cloud Function](https://cloud.google.com/functions)** `youtube-bigquery-pipeline` calls the Data and Analytics APIs, then writes to 4 BigQuery tables
+- A second Cloud Function, `youtube-reporting-ingest`, pulls the [Reporting API](https://developers.google.com/youtube/reporting) bulk reports into 19 raw `reporting_*` tables and archives every report file to Cloud Storage
 - **[Data API](https://developers.google.com/youtube/v3)** (API key) provides video metadata and public stats
 - **[Analytics API](https://developers.google.com/youtube/analytics)** (OAuth2) provides watch time, traffic sources, subscriber changes. Not impressions: those come only from the Reporting API.
 - **[Secret Manager](https://cloud.google.com/secret-manager)** stores OAuth2 credentials so no secrets live in code
@@ -82,9 +103,9 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 
 ---
 
-## Why Two YouTube APIs?
+## Why Three YouTube APIs?
 
-YouTube has two separate APIs that give you different data:
+YouTube has three separate APIs that give you different data. The first two are called by the daily pipeline function:
 
 | | [Data API v3](https://developers.google.com/youtube/v3) | [Analytics API v2](https://developers.google.com/youtube/analytics) |
 |--|-------------|-------------------|
@@ -95,7 +116,16 @@ YouTube has two separate APIs that give you different data:
 
 We need both to get the full picture. The Data API tells you a video has 10,000 views. The Analytics API tells you 60% came from YouTube search, viewers watched an average of 4 minutes, and the video gained 12 subscribers.
 
-A third API exists — the **YouTube Reporting API (v1)** — which provides the same analytics data as bulk downloadable reports. It's designed for large content networks processing millions of videos. For a single-channel daily pipeline, the Analytics API v2 is the right choice.
+The third is the **[YouTube Reporting API (v1)](https://developers.google.com/youtube/reporting)**. Instead of answering queries, it generates one CSV per report type per day and keeps each file for 60 days. It is the only public source of thumbnail impressions and click-through rate, of `engaged_views`, of traffic-source detail (the actual search terms and the suggesting videos), and of device, playback-location, demographic, card, end-screen, sharing and playlist breakdowns. It accepts the same OAuth2 scope as the Analytics API, so the one stored refresh token serves all three.
+
+| | [Reporting API v1](https://developers.google.com/youtube/reporting) |
+|--|--|
+| **What it gives you** | Bulk daily CSVs at native grain (video x day x subscribed status x country, and so on): impressions, CTR, engaged views, traffic detail, devices, demographics, cards, end screens, playlists |
+| **Authentication** | OAuth2, same `yt-analytics.readonly` scope |
+| **Data type** | Per-day activity; a day can be regenerated later with corrections, and only the newest generation is authoritative |
+| **Think of it as** | The "everything YouTube Studio knows", delivered as files you must persist before they expire |
+
+The catch is retention: a report file exists for 60 days after YouTube generates it, and a new job only backfills 30 days before its creation. That is why the ingest archives every file to Cloud Storage before it parses it, and why the jobs were created before the loader was written.
 
 ---
 
@@ -251,6 +281,18 @@ Append-only from the YouTube Analytics API v2. One row per video per traffic sou
 
 ---
 
+### Reporting API raw tables (`reporting_*`)
+
+One table per report type, generated from `cloud_function/report_specs.py` into `sql/reporting_tables.sql` (a test asserts the two agree). Each table keeps the report's native grain: `report_date` (a Pacific-time day, the same convention as `activity_date`) plus the report's own dimensions, then its metrics, then provenance columns (`report_id`, `report_create_time`, `job_id`, `load_source`, `ingested_at`). Partitioned by `report_date`, clustered by `video_id`. Dimension values can be NULL: `channel_basic_a3` emits a channel-level row with no `video_id`, and detail dimensions are blank under YouTube's anonymisation threshold. Ratio columns (`*_ctr`, `*_rate`, `*_percentage`) are per-row averages and are never summed; recompute from totals.
+
+`reporting_ingest_ledger` has one row per report file YouTube generated, with its status (`loaded`, `header_only`, `header_only_conflict`, `superseded`, `skipped_older`, `failed`), row count, hash, and archive URI. It is what the ingest reads to decide what to load, and what you read to see coverage: `sql/verification/phase2_reporting_raw.sql` has a coverage calendar query.
+
+Facts about the source data worth knowing before querying it, all observed on this channel: `average_view_duration_percentage` is on a 0 to 100 scale and exceeds 100 on looped Shorts (it is exactly `average_view_duration_seconds` over the video's duration); `video_thumbnail_impressions_ctr` is a 0 to 1 fraction; `likes` and `dislikes` can be negative (net of removals on the day); `traffic_source_type` is a numeric code (5 search, 7 suggested, 3 browse, 9 external, 24 Shorts feed, 17 notifications); `channel_basic_a3` carries channel-level subscriber rows with a NULL `video_id` that hold roughly a third of all subscribers gained, so channel growth is the sum over all rows, not over videos; and `channel_basic_a3` and `channel_traffic_source_a3` disagree on a day's views by up to about 10 percent when their reports were generated at different times, so treat `channel_basic_a3` as the source of truth for views.
+
+Three rules the ingest enforces, inside one BigQuery transaction per report: the newest `createTime` for a day wins and an older generation can never overwrite it; a report with only a header row never deletes a populated day (it is recorded as a conflict and alerted instead); and the ledger row commits with the data, so a crash cannot leave a loaded partition unrecorded or an emptied one behind.
+
+---
+
 ## Deployment (Step by Step)
 
 Run the setup scripts in order. Each script is idempotent (safe to re-run).
@@ -343,6 +385,51 @@ bash setup/5_create_scheduler.sh
 ```
 
 Creates a daily trigger at 11:50 PM Phoenix time (`America/Phoenix` timezone — no DST surprises) with 3 retries and exponential backoff.
+
+### Step 7: Create Reporting API jobs and archive what exists
+
+```bash
+python3 setup/7_create_reporting_jobs.py            # dry run: shows which report types have no job
+python3 setup/7_create_reporting_jobs.py --create   # creates them (each starts a 30-day backfill clock)
+python3 setup/archive_reporting_raw.py --verify     # copies every retained report file to gs://<project>-youtube-reporting-raw
+```
+
+Do this before anything else in this section. Reports expire 60 days after generation; the archive is the only durable copy.
+
+### Step 8: Create the Reporting tables and deploy the ingest function
+
+```bash
+bash setup/2_create_bigquery.sh                                                  # idempotent; now also applies sql/reporting_tables.sql
+BQ_DATASET=youtube_analytics REPORTING_ENABLED=false bash setup/9_deploy_reporting_function.sh
+python3 setup/backfill_reporting.py --dataset youtube_analytics --max 200         # first catch-up, from the API
+python3 setup/backfill_reporting.py --dataset youtube_analytics --from-gcs         # then anything YouTube has since expired, from the archive
+BQ_DATASET=youtube_analytics REPORTING_ENABLED=true bash setup/9_deploy_reporting_function.sh   # switch the ingest on
+```
+
+The first deploy uses `REPORTING_ENABLED=false`: the function answers with `skipped`, logs a WARNING the failure alert matches, and touches nothing, so the deploy itself can be checked. The last line switches it on. `REPORTING_ENABLED` has no default for the production function, so a later redeploy cannot silently switch it off. The script grants the function's service account `objectCreator` and `objectViewer` on the archive bucket only (it never deletes).
+
+### Step 9: Schedule the ingest and set up alerts
+
+```bash
+FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE="0 8,14 * * *" bash setup/5_create_scheduler.sh
+ALERT_EMAIL=you@example.com bash setup/6_setup_monitoring.sh
+```
+
+Twice a day because each report loads in about 15 seconds and a run is capped by `MAX_REPORTS_PER_RUN`. Both scripts are idempotent. The monitoring script creates four email alerts: the daily pipeline's analytics failure; the Reporting ingest's failures, header-only conflicts and a switched-off kill switch; a per-report-type freshness alert the ingest raises itself when any type's newest loaded day is older than `REPORTING_STALE_DAYS`; and a Cloud Scheduler failure alert for runs that time out or never answer.
+
+---
+
+## Staging and Verification
+
+Nothing reaches production untested. `setup/8_create_staging.sh` creates `youtube_analytics_staging` seeded with a copy of the four production tables, and both functions deploy there with `FUNCTION_NAME=...-staging BQ_DATASET=youtube_analytics_staging`. The deploy scripts refuse both directions of a production/staging cross.
+
+```bash
+python3 -m pytest tests/ -q                                   # offline unit tests (also run by CI on every push)
+bash scripts/verify_parity.sh                                 # staging vs prod, by business key and fingerprint
+bash scripts/verify_reporting.sh youtube_analytics_staging    # grain, ledger, cross-source reconciliation
+```
+
+The queries behind those scripts live in `sql/verification/` as paste-ready blocks with the expected result written above each one, so they can be run by hand in the BigQuery console.
 
 ---
 
@@ -468,24 +555,48 @@ Everything runs within GCP free tier:
 ## Project Structure
 
 ```text
-cloud_function/
-  main.py                      # Cloud Function entry point
-  requirements.txt             # Python dependencies
+cloud_function/                # the only directory deployed to Cloud Functions
+  main.py                      # daily pipeline entry point (Data + Analytics APIs)
+  reporting_main.py            # Reporting ingest entry point (second function)
   youtube_data_api.py          # YouTube Data API v3 client
   youtube_analytics_api.py     # YouTube Analytics API v2 client
-  bigquery_writer.py           # BigQuery write operations
+  youtube_reporting_api.py     # YouTube Reporting API v1 client (list, download)
+  reporting_parser.py          # header-driven CSV parser, fails on schema drift
+  report_specs.py              # schema registry for the 19 report types
+  reporting_loader.py          # newest-generation selection, ledger, archive
+  partition_replacer.py        # one-transaction partition replace with assertions
+  bigquery_writer.py           # BigQuery writes for the four original tables
+  oauth_credentials.py         # the one Secret Manager credential loader
+  retry.py                     # the one retry policy (stdlib only)
+  requirements.txt
 setup/
   1_enable_apis.sh             # Enable GCP APIs
-  2_create_bigquery.sh         # Create BigQuery dataset + tables
+  2_create_bigquery.sh         # Create BigQuery dataset + original tables
   3_setup_oauth.sh             # OAuth2 setup guide
-  4_deploy_function.sh         # Deploy Cloud Function
-  5_create_scheduler.sh        # Create Cloud Scheduler job
-  oauth_helper.py              # One-time OAuth consent flow
+  4_deploy_function.sh         # Deploy the daily pipeline function
+  5_create_scheduler.sh        # Create a Cloud Scheduler job (either function)
+  6_setup_monitoring.sh        # Email alert policies
+  7_create_reporting_jobs.py   # Create Reporting API jobs
+  8_create_staging.sh          # Create and seed the staging dataset
+  9_deploy_reporting_function.sh
+  archive_reporting_raw.py     # Copy every retained report to Cloud Storage
+  backfill_reporting.py        # Catch-up, replay from archive, deliberate overrides
   backfill_analytics.py        # Backfill historical Analytics API data
+  generate_reporting_ddl.py    # Render sql/reporting_tables.sql from report_specs.py
+  oauth_helper.py              # One-time OAuth consent flow
+  _bootstrap.py                # sys.path shim so setup/ imports cloud_function/
+scripts/
+  check_recent_runs.sh         # Freshness of the four original tables
+  verify_audit_fixes.sh        # The 2026-08 audit assertions
+  verify_parity.sh             # Staging vs prod parity
+  verify_reporting.sh          # Reporting tables and ledger assertions
 sql/
-  create_tables.sql            # BigQuery DDL (4 tables)
+  create_tables.sql            # BigQuery DDL (4 original tables)
+  reporting_tables.sql         # GENERATED DDL (19 Reporting tables + ledger)
+  verification/                # paste-ready verification blocks per phase
   sample_queries.sql           # Analytical queries
   verification_queries.sql     # Data integrity and backfill verification
+tests/                         # offline pytest suite; python3 -m pytest tests/ -q
 prompts/
   completed/
     001-youtube-bigquery-pipeline-plan.md   # Claude Code's 6-phase implementation plan

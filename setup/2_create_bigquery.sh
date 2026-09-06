@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create BigQuery dataset and tables for the YouTube analytics pipeline.
+# Create the BigQuery dataset and every table: the four original tables
+# (sql/create_tables.sql) and the generated Reporting API tables (sql/reporting_tables.sql).
 # Requires: setup/1_enable_apis.sh has been run first.
 # Env: BQ_DATASET (default youtube_analytics), GCP_REGION (default us-central1).
 
@@ -30,6 +31,14 @@ echo "Creating tables from SQL DDL..."
 # Plain sed, so there is no gettext/envsubst prerequisite on a fresh machine.
 sed "s/\${BQ_DATASET}/$DATASET/g" "$REPO_ROOT/sql/create_tables.sql" | bq query \
     --project_id="$PROJECT_ID" \
+    --use_legacy_sql=false \
+    --nouse_cache
+
+echo ""
+echo "Creating Reporting API tables from the generated DDL (CREATE TABLE IF NOT EXISTS)..."
+sed "s/\${BQ_DATASET}/$DATASET/g" "$REPO_ROOT/sql/reporting_tables.sql" | bq query \
+    --project_id="$PROJECT_ID" \
+    --location="$LOCATION" \
     --use_legacy_sql=false \
     --nouse_cache
 

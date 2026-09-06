@@ -215,12 +215,21 @@ def test_download_retries_transient_status_then_succeeds(monkeypatch):
     assert len(client._session.calls) == 2
 
 
-def test_download_does_not_retry_403(monkeypatch):
+def test_download_does_not_retry_403_and_never_leaks_the_url(monkeypatch):
     client = make_client(monkeypatch, FakeService())
     client._session = FakeSession([FakeResponse(b"", status=403)])
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(ReportDownloadError) as exc:
         client.download(ref("r", "2026-09-03", "2026-09-05T12:20:00"))
     assert len(client._session.calls) == 1
+    assert "HTTP 403" in str(exc.value) and "example.invalid" not in str(exc.value)
+
+
+def test_download_exhausted_retries_surface_as_sanitized_error(monkeypatch):
+    client = make_client(monkeypatch, FakeService())
+    client._session = FakeSession([FakeResponse(b"", status=503)] * 4)
+    with pytest.raises(ReportDownloadError) as exc:
+        client.download(ref("r", "2026-09-03", "2026-09-05T12:20:00"))
+    assert len(client._session.calls) == 4 and "HTTP 503" in str(exc.value)
 
 
 @pytest.mark.parametrize(

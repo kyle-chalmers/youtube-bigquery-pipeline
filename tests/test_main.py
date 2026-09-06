@@ -84,8 +84,13 @@ def wired(monkeypatch):
 
 
 def alert_strings_from_monitoring_script():
+    """Quoted arguments passed to log_filter for the daily pipeline function."""
     text = (ROOT / "setup" / "6_setup_monitoring.sh").read_text()
-    return set(re.findall(r'textPayload:\\"([^"\\]+)\\"', text))
+    out = set()
+    for line in text.splitlines():
+        if 'log_filter "$FUNCTION_NAME"' in line:
+            out.update(re.findall(r'"([^"]+)"', line.split('log_filter "$FUNCTION_NAME"', 1)[1]))
+    return out
 
 
 def test_alert_filter_strings_are_emitted_verbatim(wired, caplog):

@@ -174,7 +174,13 @@ class YouTubeReportingClient:
             resp.raise_for_status()
             return resp
 
-        resp = with_retry(_get, self.max_retries)
+        try:
+            resp = with_retry(_get, self.max_retries)
+        except Exception as e:  # noqa: BLE001 - requests exceptions carry the URL; never let it out
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            raise ReportDownloadError(
+                f"report {ref.report_id}: download failed with HTTP {status if status else type(e).__name__}"
+            ) from None
         data = resp.content
         declared = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
         if declared and resp.headers.get("Content-Encoding") is None and int(declared) != len(data):
