@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 from google.cloud import bigquery
 
+from log_safety import redact
 from report_specs import LEDGER_TABLE, PROVENANCE_COLUMNS, ReportSpec
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,7 @@ class StagedTransactionalReplacer:
         try:
             self.client.delete_table(f"{self.dataset_ref}.{work_table}", not_found_ok=True)
         except Exception as e:  # noqa: BLE001 - the table expires in an hour anyway
-            logger.warning(f"could not drop work table {work_table}: {e}")
+            logger.warning(f"could not drop work table {work_table}: {redact(str(e))}")
 
     def replace_partition(self, spec: ReportSpec, rows: list[dict[str, Any]], provenance: dict[str, Any]) -> int:
         if not rows:

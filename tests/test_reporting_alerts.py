@@ -34,7 +34,7 @@ def test_monitoring_script_matches_the_strings_the_code_emits():
         reporting_main.SKIPPED_LOG,
     }
     pipeline = matched_strings("FUNCTION_NAME")
-    assert pipeline == {"Analytics API failed entirely", "Wrote daily_video_analytics — 0 rows"}
+    assert pipeline == {"Analytics API failed entirely", "Wrote daily_video_analytics — 0 rows", "Pipeline failed"}
 
 
 def test_reporting_main_emits_the_alert_strings(monkeypatch, caplog):

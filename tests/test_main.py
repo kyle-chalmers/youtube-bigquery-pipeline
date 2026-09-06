@@ -95,7 +95,7 @@ def alert_strings_from_monitoring_script():
 
 def test_alert_filter_strings_are_emitted_verbatim(wired, caplog):
     expected = alert_strings_from_monitoring_script()
-    assert expected == {"Analytics API failed entirely", "Wrote daily_video_analytics — 0 rows"}, \
+    assert expected == {"Analytics API failed entirely", "Wrote daily_video_analytics — 0 rows", "Pipeline failed"}, \
         "the monitoring filter changed; update this test and main.py together"
 
     # Case 1: analytics returns no rows -> the 0-rows string must appear exactly.

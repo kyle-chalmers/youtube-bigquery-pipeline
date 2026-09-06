@@ -7,6 +7,7 @@ from typing import Any
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from log_safety import redact
 from oauth_credentials import load_oauth_credentials
 from retry import RETRYABLE_STATUSES as _SHARED_RETRYABLE
 from retry import with_retry
@@ -100,7 +101,7 @@ class YouTubeAnalyticsAPI:
         try:
             api_rows = self._fetch_video_rows(video_ids, date_str)
         except Exception as e:
-            logger.error(f"Analytics API query failed: {e}")
+            logger.error(f"Analytics API query failed: {redact(str(e))}")
             return [], [f"Analytics query failed: {str(e)}"]
 
         # Parse response rows
@@ -181,7 +182,7 @@ class YouTubeAnalyticsAPI:
                     )
 
             except Exception as e:
-                logger.warning(f"Traffic sources failed for {video_id}: {e}")
+                logger.warning(f"Traffic sources failed for {video_id}: {redact(str(e))}")
                 errors.append(f"{video_id}: {str(e)}")
 
         logger.info(

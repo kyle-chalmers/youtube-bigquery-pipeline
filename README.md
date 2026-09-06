@@ -287,9 +287,29 @@ One table per report type, generated from `cloud_function/report_specs.py` into 
 
 `reporting_ingest_ledger` has one row per report file YouTube generated, with its status (`loaded`, `header_only`, `header_only_conflict`, `superseded`, `skipped_older`, `failed`), row count, hash, and archive URI. It is what the ingest reads to decide what to load, and what you read to see coverage: `sql/verification/phase2_reporting_raw.sql` has a coverage calendar query.
 
-Facts about the source data worth knowing before querying it, all observed on this channel: `average_view_duration_percentage` is on a 0 to 100 scale and exceeds 100 on looped Shorts (it is exactly `average_view_duration_seconds` over the video's duration); `video_thumbnail_impressions_ctr` is a 0 to 1 fraction; `likes` and `dislikes` can be negative (net of removals on the day); `traffic_source_type` is a numeric code (5 search, 7 suggested, 3 browse, 9 external, 24 Shorts feed, 17 notifications); `channel_basic_a3` carries channel-level subscriber rows with a NULL `video_id` that hold roughly a third of all subscribers gained, so channel growth is the sum over all rows, not over videos; and `channel_basic_a3` and `channel_traffic_source_a3` disagree on a day's views by up to about 10 percent when their reports were generated at different times, so treat `channel_basic_a3` as the source of truth for views.
+Facts about the source data worth knowing before querying it, all observed on this channel: `average_view_duration_percentage` is on a 0 to 100 scale and exceeds 100 on looped Shorts (it is exactly `average_view_duration_seconds` over the video's duration); `video_thumbnail_impressions_ctr` is a 0 to 1 fraction; `likes` and `dislikes` can be negative (net of removals on the day); `traffic_source_type` is a numeric code (5 search, 7 suggested, 3 browse, 9 external, 24 Shorts feed, 17 notifications); `channel_basic_a3` carries channel-level subscriber rows with a NULL `video_id` that hold roughly a third of all subscribers gained, so channel growth is the sum over all rows, not over videos; and `channel_basic_a3` and `channel_traffic_source_a3` disagree on a day's views by up to about 10 percent when their reports were generated at different times, so treat `channel_basic_a3` as the source of truth for views. `subscribed_status` values are `subscribed` and `not_subscribed` (lowercase snake case, not the `UNSUBSCRIBED` the docs might suggest); `average_view_duration_seconds` is 0 whenever `engaged_views` is 0 even with positive watch time, so per-row AVD on Shorts is not reproducible from the other columns; and `average_view_duration_percentage` exceeds 100 on looped playback of any video type, not only Shorts.
 
 Three rules the ingest enforces, inside one BigQuery transaction per report: the newest `createTime` for a day wins and an older generation can never overwrite it; a report with only a header row never deletes a populated day (it is recorded as a conflict and alerted instead); and the ledger row commits with the data, so a crash cannot leave a loaded partition unrecorded or an emptied one behind.
+
+### Growth views (`sql/views/`)
+
+Twelve views sit on the Reporting tables and answer the growth questions the raw grain makes awkward. `setup/10_create_views.sh` creates them in filename order; they hold no data, so they are safe to iterate on. Every file's header states its grain, timezone (Pacific day), join cardinality and formulas, and `tests/test_views_sql.py` enforces that contract.
+
+| View | Grain | Answers |
+|---|---|---|
+| `video_current` | one row per video | latest metadata snapshot; the only relation other views may read `video_metadata` through |
+| `traffic_source_type_lookup` | one row per code | Reporting's numeric traffic codes with names and the Analytics API enum they correspond to |
+| `video_daily_funnel` | video, day | impressions, CTR, clicks, views, engaged views, watch time, average view duration, subscribers per 1,000 views, non-subscriber view share, Shorts engaged-start share |
+| `video_audience_growth` | video, day (plus a channel-level line) | which videos bring in non-subscribers and subscribers; channel-level subscriber rows are kept as their own line, never dropped |
+| `video_traffic_detail_daily` | video, day, source, detail | search terms, suggested-from videos (internal vs external), external referrers |
+| `video_ctr_by_surface_daily` | video, day, source, device | CTR read per surface, which is the only fair way to read it |
+| `channel_device_mix_daily` | day, video type, device | phone vs TV vs desktop share of watch time |
+| `video_end_screen_daily`, `video_cards_daily` | video, day, element or card type | end screen and card click rates |
+| `channel_sharing_daily` | day, service | where shares go |
+| `channel_demographics` | day, age group, gender | audience composition (percentages, never summed) |
+| `channel_daily_summary` | day | views, engaged views, watch time, subscribers (including channel-level rows), likes, comments, shares, impressions, CTR and clicks rolled up to the channel day from `channel_basic_a3` and `reach_basic_a1`, with calendar 7 and 28 day windows and the count of days that fed each window |
+
+Two rules every view follows: aggregate each source to the target grain before any join, and recompute ratios from totals instead of averaging the source's per-row ratios. Two findings from building them, both observed 2026-09-05: the source occasionally reports a click-through rate above 1 on a one-impression row, so `clicks` can exceed `impressions` on such rows; and YouTube's per-row average view duration is reproducible from watch time over views on full-length videos (96 percent of single-segment days within one second) but not cleanly on Shorts, where a view has counted any start or replay since 2025-03-31. The funnel view therefore exposes both `avg_view_duration_seconds` (watch time over views, Studio's stated definition) and `avg_view_duration_per_engaged_view_seconds`. In the funnel a metric is 0 when that day's report exists and omits the video, and NULL only when no report for that day has been loaded on that side. `docs/studio-comparison.md` says which YouTube Studio number to put next to which column.
 
 ---
 
@@ -415,7 +435,16 @@ FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE
 ALERT_EMAIL=you@example.com bash setup/6_setup_monitoring.sh
 ```
 
-Twice a day because each report loads in about 15 seconds and a run is capped by `MAX_REPORTS_PER_RUN`. Both scripts are idempotent. The monitoring script creates four email alerts: the daily pipeline's analytics failure; the Reporting ingest's failures, header-only conflicts and a switched-off kill switch; a per-report-type freshness alert the ingest raises itself when any type's newest loaded day is older than `REPORTING_STALE_DAYS`; and a Cloud Scheduler failure alert for runs that time out or never answer.
+Twice a day because each report loads in about 15 seconds and a run is capped by `MAX_REPORTS_PER_RUN`. Both scripts are idempotent. The monitoring script creates four email alerts: the daily pipeline's analytics failure or a whole-pipeline crash (`Pipeline failed`); the Reporting ingest's failures, header-only conflicts and a switched-off kill switch; a per-report-type freshness alert the ingest raises itself when any type's newest loaded day is older than `REPORTING_STALE_DAYS`; and a Cloud Scheduler failure alert for runs that time out or never answer.
+
+### Step 10: Create the growth views
+
+```bash
+BQ_DATASET=youtube_analytics bash setup/10_create_views.sh
+bash scripts/verify_views.sh youtube_analytics
+```
+
+`CREATE OR REPLACE VIEW` is idempotent and touches no data. The verify script asserts every view's grain is unique, that the funnel and summary have no fan-out, that the summary reconciles to the raw tables, that channel-level subscribers survive, and that every traffic code in the data is named. It ends by printing three videos for the newest complete day in YouTube Studio's Advanced Mode column order for a side-by-side check.
 
 ---
 
@@ -427,6 +456,7 @@ Nothing reaches production untested. `setup/8_create_staging.sh` creates `youtub
 python3 -m pytest tests/ -q                                   # offline unit tests (also run by CI on every push)
 bash scripts/verify_parity.sh                                 # staging vs prod, by business key and fingerprint
 bash scripts/verify_reporting.sh youtube_analytics_staging    # grain, ledger, cross-source reconciliation
+bash scripts/verify_views.sh youtube_analytics_staging        # view grain, fan-out, ratio recomputation, Studio spot-check rows
 ```
 
 The queries behind those scripts live in `sql/verification/` as paste-ready blocks with the expected result written above each one, so they can be run by hand in the BigQuery console.
@@ -568,6 +598,7 @@ cloud_function/                # the only directory deployed to Cloud Functions
   bigquery_writer.py           # BigQuery writes for the four original tables
   oauth_credentials.py         # the one Secret Manager credential loader
   retry.py                     # the one retry policy (stdlib only)
+  log_safety.py                # redacts API keys and tokens before anything is logged
   requirements.txt
 setup/
   1_enable_apis.sh             # Enable GCP APIs
@@ -579,6 +610,7 @@ setup/
   7_create_reporting_jobs.py   # Create Reporting API jobs
   8_create_staging.sh          # Create and seed the staging dataset
   9_deploy_reporting_function.sh
+  10_create_views.sh           # Create or replace the growth views in one dataset
   archive_reporting_raw.py     # Copy every retained report to Cloud Storage
   backfill_reporting.py        # Catch-up, replay from archive, deliberate overrides
   backfill_analytics.py        # Backfill historical Analytics API data
@@ -590,13 +622,17 @@ scripts/
   verify_audit_fixes.sh        # The 2026-08 audit assertions
   verify_parity.sh             # Staging vs prod parity
   verify_reporting.sh          # Reporting tables and ledger assertions
+  verify_views.sh              # Growth view assertions and Studio spot-check rows
 sql/
   create_tables.sql            # BigQuery DDL (4 original tables)
   reporting_tables.sql         # GENERATED DDL (19 Reporting tables + ledger)
   verification/                # paste-ready verification blocks per phase
+  views/                       # the twelve growth views, one file each
   sample_queries.sql           # Analytical queries
   verification_queries.sql     # Data integrity and backfill verification
 tests/                         # offline pytest suite; python3 -m pytest tests/ -q
+docs/
+  studio-comparison.md         # which YouTube Studio number to compare to which column
 prompts/
   completed/
     001-youtube-bigquery-pipeline-plan.md   # Claude Code's 6-phase implementation plan

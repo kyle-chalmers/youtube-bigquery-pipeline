@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import traceback
 import uuid
 
 import functions_framework
@@ -32,6 +33,7 @@ except Exception:  # noqa: BLE001 - local runs have no Cloud Logging
 
 from oauth_credentials import load_oauth_credentials
 from partition_replacer import StagedTransactionalReplacer
+from log_safety import redact
 from reporting_loader import GcsArchive, IngestLedger, ReportingLoader, freshness_by_type
 from youtube_reporting_api import YouTubeReportingClient
 
@@ -115,5 +117,6 @@ def reporting_main(request) -> tuple[dict, int]:
         result["run_id"] = run_id
         return result, 200
     except Exception as e:
-        log.exception(f"{FAILED_LOG}: {e}")
+        # No log.exception: the raw traceback could carry a request URL. Both parts redacted.
+        log.error(f"{FAILED_LOG}: {redact(str(e))}\n{redact(traceback.format_exc())}")
         return {"error": str(e), "run_id": run_id}, 500

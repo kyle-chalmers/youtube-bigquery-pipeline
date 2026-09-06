@@ -30,6 +30,7 @@ from typing import Any
 
 from google.cloud import bigquery
 
+from log_safety import redact
 from partition_replacer import AlreadyLoaded, PartitionReplacer, ReplaceRefused
 from report_specs import LEDGER_TABLE, SPECS, ReportSpec
 from reporting_parser import parse_report
@@ -260,7 +261,7 @@ class ReportingLoader:
                     f"CSV date {rows[0]['report_date']} disagrees with the report's startTime day {ref.report_date}"
                 )
         except Exception as e:  # noqa: BLE001 - recorded in the ledger as failed; the run continues
-            self._fail(ref, summary, f"{type(e).__name__}: {e}")
+            self._fail(ref, summary, f"{type(e).__name__}: {redact(str(e))}")
             return
 
         provenance = {
@@ -287,13 +288,13 @@ class ReportingLoader:
         except AlreadyLoaded as e:
             # Another run committed this day first. Its ledger row is right; leave it alone.
             summary.skipped_current += 1
-            logger.info(f"Reporting skip for {ref.report_type} {ref.report_date}: {e}")
+            logger.info(f"Reporting skip for {ref.report_type} {ref.report_date}: {redact(str(e))}")
             return
         except ReplaceRefused as e:
             self._fail(ref, summary, str(e), **meta)
             return
         except Exception as e:  # noqa: BLE001 - a BigQuery error on one report must not abort the run
-            self._fail(ref, summary, f"{type(e).__name__}: {e}", **meta)
+            self._fail(ref, summary, f"{type(e).__name__}: {redact(str(e))}", **meta)
             return
         summary.loaded += 1
         summary.rows += n

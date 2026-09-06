@@ -98,8 +98,8 @@ EOF
 
 upsert_policy "youtube-analytics-failure${POLICY_SUFFIX}" \
     "Analytics failure log entry" \
-    "$(log_filter "$FUNCTION_NAME" "Analytics API failed entirely" "Wrote daily_video_analytics — 0 rows")" \
-    "Analytics half of the YouTube BigQuery pipeline wrote 0 rows. Token expiry is NOT the usual cause; the current token has run for months. Check likely causes in order: (1) the Analytics API had no data yet for the queried activity date, which is what happens when the lookback sits near the edge of availability; (2) one metric in the six-metric query hit a backend issue and zeroed the whole response. Fastest triage: check whether daily_traffic_sources got rows for the same activity date. If it did, credentials are fine. The self-healing gap re-query should recover the day within GAP_LOOKBACK_DAYS."
+    "$(log_filter "$FUNCTION_NAME" "Analytics API failed entirely" "Wrote daily_video_analytics — 0 rows" "Pipeline failed")" \
+    "Either the whole pipeline crashed (log line starts with Pipeline failed; on 2026-08-14 the cause was the Data API daily quota exhausted by another consumer in this project, since the run fires ten minutes before the Pacific-midnight quota reset) or the analytics half wrote 0 rows. Token expiry is NOT the usual cause; the current token has run for months. Check likely causes in order: (1) the Analytics API had no data yet for the queried activity date, which is what happens when the lookback sits near the edge of availability; (2) one metric in the six-metric query hit a backend issue and zeroed the whole response. Fastest triage: check whether daily_traffic_sources got rows for the same activity date. If it did, credentials are fine. The self-healing gap re-query should recover the day within GAP_LOOKBACK_DAYS."
 
 upsert_policy "youtube-reporting-failure${POLICY_SUFFIX}" \
     "Reporting ingest failure log entry" \
