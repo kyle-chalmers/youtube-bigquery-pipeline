@@ -50,8 +50,8 @@ and 2026-08-27 to 09-02 for the daily series). Results, with the rule each one p
 | Channel views by date, 7 days | 554, 575, 453, 455, 708, 623, 672 | 558, 588, 453, 455, 704, 623, 672 | 4 of 7 exact; 08-27 +4, 08-28 +13 (2.2%), 08-31 minus 4. YouTube has NOT regenerated those reports (checked with a dry-run listing the same day), so this is Studio's live counter drifting from the report as generated, in both directions |
 | One video, traffic sources, 28 days | search 1,091, direct 110, suggested 82, browse 81, external 61, other 21 | 1,089, 109, 83, 80, 61, 20 | within 2 views per source, same cause as the row above |
 
-Rules that came out of it:  in  is now watch time over engaged
-views (Studio's definition) and the views-denominator version is ; a
+Rules that came out of it: `avg_view_duration_seconds` in `video_daily_funnel` is now watch time over engaged
+views (Studio's definition) and the views-denominator version is `avg_view_duration_over_views_seconds`; a
 day's views can differ from Studio by up to about 2 percent without any report having been regenerated, so
 the automated reconciliation tolerances (1 percent of total, 3 percent of rows) stand; and the newest-generation
 rule is doing its job (the two days that had two generations are the ones that match exactly).
