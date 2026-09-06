@@ -129,6 +129,12 @@ The catch is retention: a report file exists for 60 days after YouTube generates
 
 ---
 
+## Running this for your own channel
+
+Nothing here is tied to the original channel. `docs/adopt-for-your-channel.md` is the short path for another channel owner: what you need, the order that keeps each step safe, what to change and what to leave alone, and a prompt you can paste into a coding agent to do the adaptation with you.
+
+---
+
 ## Prerequisites
 
 | Tool | Purpose | Install |
@@ -635,6 +641,8 @@ sql/
 tests/                         # offline pytest suite; python3 -m pytest tests/ -q
 docs/
   studio-comparison.md         # which YouTube Studio number to compare to which column
+  adopt-for-your-channel.md    # how another channel owner sets this up, with an agent prompt
+  diagrams/                    # architecture diagram (Excalidraw source and PNG)
 prompts/
   completed/
     001-youtube-bigquery-pipeline-plan.md   # Claude Code's 6-phase implementation plan
