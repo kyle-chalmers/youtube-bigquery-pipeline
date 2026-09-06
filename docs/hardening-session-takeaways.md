@@ -19,55 +19,44 @@ data pipeline with an agent doing the work.
 - **Nothing touched production until the staging copy had proven it**, and the promotion ran from a
   written runbook with a stop condition at every step.
 
-## What to take away
+## Five things to do on your own pipeline
 
-- **Capture before you build.** Reporting API files expire 60 days after YouTube generates them. The first
-  thing that shipped was an archive of every file to Cloud Storage, before a line of loader code existed.
-  When the loader later needed a replay, the archive was there.
-- **One copy of anything that can destroy data.** The old pipeline had two hand-copied writers and two
-  retry wrappers, and the copies had drifted. The load-bearing rules (delete keyed on the activity date,
-  refuse to delete on an empty response) now live in one place with tests that pin them.
-- **Make each load one transaction with assertions in front of the delete.** Rows present, exactly the
-  expected day, the configured channel, unique grain, not already loaded, no newer generation loaded. If
-  any assertion fails, nothing changes. A ledger row commits with the data, so the table and its memory of
-  what loaded cannot disagree.
-- **An empty file is not a correction until a human says so.** A regenerated report with only a header row
-  never deletes a populated day; it is recorded as a conflict and emailed. This repo lost three days once by
-  trusting an empty response.
-- **A verification script must fail loudly, or it is decoration.** Review found a check that printed PASS
-  when its query failed, because the query ran inside a command substitution and its exit code vanished.
-  Every check now assigns first and treats an empty result as a failure.
-- **Reviewers produce leads, not verdicts.** Six reviewers found real defects the author missed: a
-  header-only day that read as "no report", rolling windows that counted rows instead of days, a test
-  regex that could never match the code it guarded. Each finding was reproduced before it was fixed, and
-  one was recorded as a disagreement. A reviewer that hit its usage limit was recorded as not having run,
-  never as an approval.
-- **Compare against the source of truth, and read the documentation when it disagrees.** Checking three
-  videos in YouTube Studio showed that "average view duration" is watch time over engaged views, not
-  views. YouTube's own help page says so. It also surfaced that YouTube changed what a view means on
-  2026-08-24 for every format, without restating history. The raw rows were never wrong; the metric's
-  meaning had moved.
-- **When a definition changes under you, keep the raw data, expose both denominators, and name the stable
-  series.** Every ratio in the views exists on views and on engaged views, and the docs say which one to
-  use for a trend that crosses the date.
-- **Chase incidents to a mechanism, with evidence.** A missing day turned out to be the Data API quota,
-  exhausted by another tool in the same cloud project ten minutes before the quota reset. The crash log
-  also contained the API key inside a request URL, and the alert had not fired because it did not match a
-  whole-pipeline crash. Three fixes came from one investigation: schedule moved, log redaction, alert
-  string added.
-- **A signed total can hide two errors.** The cross-source reconciliation read 0.14 percent because a
-  partial day overcounted on one side exactly as revised days undercounted on the other. Fixing the
-  partial day exposed it. The check is now a mean absolute daily difference.
-- **Own the mistakes in the record.** Moving the nightly schedule cancelled the run in between, which I had
-  been told would not happen. The day was recovered from the staging copy, the runbook now carries the
-  rule, and the review record says what went wrong.
-- **Reversibility is what lets a promotion run overnight.** Snapshots of the original tables, a kill
-  switch on the new function, an archive that can replay any day, and a runbook that stops at the first
-  failure with the switch off.
-- **Hand the next session its decisions, not just its tasks.** The Phase 4 prompt lists what was decided
-  and why, so the next agent does not relitigate the header-only policy or the AVD definition.
-- **Public repo, private values.** Project, channel and job ids live in a gitignored folder; a tracked
-  file that held a channel id from the original build was cleaned up on the way through.
+1. **Archive the raw source before you write the loader.** Reporting API files expire 60 days after
+   YouTube generates them. The first thing that shipped was a copy of every file to Cloud Storage, keyed by
+   report id, before a line of loader code existed. When the loader later needed a replay, the archive was
+   there. Whatever your source is, if it can expire or be revised, keep the bytes.
+
+2. **Put assertions in front of every delete, inside one transaction.** Rows present, exactly the expected
+   day, the configured channel, unique grain, not already loaded, no newer generation loaded. If any fails,
+   nothing changes, and the ledger row that records the load commits with the data. And decide up front that
+   an empty file never deletes a populated day; this repo once lost three days by trusting an empty response.
+
+3. **Make verification something you can paste, and something that can fail.** Every phase shipped a SQL
+   file with the expected result written above each query, plus a script that runs them and treats a failed
+   or empty query as a failure. Review found a check that printed PASS when its query errored, and a test
+   whose regex could never match the code it guarded. Test the tests.
+
+4. **Run independent reviewers at every gate, and treat what they say as leads.** A second model and five
+   review agents looked at each phase's diff. They found a header-only day that read as "no report", rolling
+   windows that counted rows instead of days, and a metric that let two errors cancel. Each finding was
+   reproduced before it was fixed, one was recorded as a disagreement, and a reviewer that hit its usage
+   limit was recorded as not having run rather than as an approval.
+
+5. **Check three numbers against the source of truth, then read the documentation.** Three videos compared
+   in YouTube Studio showed that "average view duration" is watch time over engaged views, not views, and
+   that YouTube changed what a view means on 2026-08-24 without restating history. YouTube's help pages
+   confirmed both. The raw rows were never wrong; the metric's meaning had moved, so the views now expose
+   every ratio on both denominators and name the stable series.
+
+## Smaller lessons
+
+- One copy of anything that can destroy data: the old pipeline's two hand-copied writers had drifted.
+- Chase an incident to a mechanism. One missing day led to a quota fix, log redaction and a new alert string.
+- A signed total can hide two errors; the reconciliation is now a mean absolute daily difference.
+- Moving a scheduler's time cancels the run in between. It is in the runbook now because it bit here.
+- Reversibility (snapshots, a kill switch, the archive, a runbook that stops) is what lets a promotion run
+  overnight.
+- Hand the next session its decisions, not just its tasks, so nothing gets relitigated.
 
 ## Do this for your own channel
 
