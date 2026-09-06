@@ -72,6 +72,15 @@ gcloud scheduler jobs "$VERB" http "$JOB_NAME" \
 echo ""
 echo "Scheduler job created successfully."
 echo ""
+# The scheduler authenticates with an OIDC token for the service account above, which must be
+# allowed to invoke the function. Nothing else grants this; the first production ingest run
+# on 2026-09-06 failed with "IAM principal lacks run.routes.invoke" because the binding had only
+# ever been made by hand for the original function. Idempotent.
+echo "Granting invoker on $FUNCTION_NAME to the scheduler's service account..."
+gcloud functions add-invoker-policy-binding "$FUNCTION_NAME" \
+    --region="$REGION" --project="$PROJECT_ID" \
+    --member="serviceAccount:$SERVICE_ACCOUNT" >/dev/null
+
 echo "To test manually:"
 echo "  gcloud scheduler jobs run $JOB_NAME --location=$REGION --project=$PROJECT_ID"
 echo ""

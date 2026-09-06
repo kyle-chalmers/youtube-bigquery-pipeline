@@ -437,7 +437,7 @@ FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE
 ALERT_EMAIL=you@example.com bash setup/6_setup_monitoring.sh
 ```
 
-Twice a day because each report loads in about 15 seconds and a run is capped by `MAX_REPORTS_PER_RUN`. Both scripts are idempotent. The monitoring script creates four email alerts: the daily pipeline's analytics failure or a whole-pipeline crash (`Pipeline failed`); the Reporting ingest's failures, header-only conflicts and a switched-off kill switch; a per-report-type freshness alert the ingest raises itself when any type's newest loaded day is older than `REPORTING_STALE_DAYS`; and a Cloud Scheduler failure alert for runs that time out or never answer.
+Twice a day because each report loads in about 15 seconds and a run is capped by `MAX_REPORTS_PER_RUN`. Both scripts are idempotent, and the scheduler script also grants its service account permission to invoke the function (without it the job fails with a 403 that only the scheduler-failure alert reports). The monitoring script creates four email alerts: the daily pipeline's analytics failure or a whole-pipeline crash (`Pipeline failed`); the Reporting ingest's failures, header-only conflicts and a switched-off kill switch; a per-report-type freshness alert the ingest raises itself when any type's newest loaded day is older than `REPORTING_STALE_DAYS`; and a Cloud Scheduler failure alert for runs that time out or never answer.
 
 ### Step 10: Create the growth views
 
