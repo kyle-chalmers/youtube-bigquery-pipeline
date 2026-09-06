@@ -73,7 +73,7 @@ echo
 day="${DAY:-$(scalar "SELECT MAX(snapshot_date) FROM $(T "$STAGING" video_metadata)")}"
 prod_has=$(scalar "SELECT COUNT(*) FROM $(T "$PROD" video_metadata) WHERE snapshot_date='$day'")
 if [[ "$prod_has" == "0" ]]; then
-    echo "prod has no rows for staging's snapshot_date $day yet (prod runs 23:50 America/Phoenix); re-run after it does" >&2
+    echo "prod has no rows for staging's snapshot_date $day yet (prod runs 00:10 America/Phoenix); re-run after it does" >&2
     exit 2
 fi
 pm=$(scalar "SELECT COUNT(*) FROM $(T "$PROD" video_metadata) WHERE snapshot_date='$day'")

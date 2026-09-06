@@ -43,7 +43,7 @@ UPLOADS_PLAYLIST_ID = os.environ.get(
     "UPLOADS_PLAYLIST_ID", "UU" + CHANNEL_ID[2:] if CHANNEL_ID.startswith("UC") else ""
 )
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-# Cloud Run is UTC. The scheduler fires at 23:50 America/Phoenix, which is already
+# Cloud Run is UTC. The scheduler fired at 23:50 America/Phoenix (00:10 since 2026-09-05), which is already
 # the next day in UTC, so date.today() stamped every row one day ahead of the local
 # day it summarised. Stamp the local day instead.
 PIPELINE_TZ = ZoneInfo(os.environ.get("PIPELINE_TZ", "America/Phoenix"))

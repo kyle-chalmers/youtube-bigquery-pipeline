@@ -15,7 +15,7 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 ```text
                             ┌──────────────────────────────────┐
                             │       Google Cloud Scheduler      │
-                            │  (Daily @ 11:50 PM Phoenix time)  │
+                            │  (Daily @ 00:10 Phoenix time)    │
                             └────────────────┬─────────────────┘
                                              │ HTTP trigger
                                              ▼
@@ -404,7 +404,7 @@ gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
 bash setup/5_create_scheduler.sh
 ```
 
-Creates a daily trigger at 11:50 PM Phoenix time (`America/Phoenix` timezone — no DST surprises) with 3 retries and exponential backoff.
+Creates a daily trigger at 00:10 Phoenix time (`America/Phoenix` timezone — no DST surprises), ten minutes after the YouTube Data API quota resets at Pacific midnight so the pipeline is the first consumer of the day rather than the last (moved from 11:50 PM on 2026-09-05 after a quota-exhaustion failure) with 3 retries and exponential backoff.
 
 ### Step 7: Create Reporting API jobs and archive what exists
 

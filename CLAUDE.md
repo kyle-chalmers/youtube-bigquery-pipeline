@@ -62,7 +62,7 @@ curl -s "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetail
 
 Two functions, one source directory (`cloud_function/`), one service account.
 
-- **`youtube-bigquery-pipeline`** (daily pipeline): entry point `main` in `main.py`; env `GCP_PROJECT`, `BQ_DATASET`, `YOUTUBE_CHANNEL_ID`, `UPLOADS_PLAYLIST_ID`, `PIPELINE_TZ`, `ANALYTICS_LOOKBACK_DAYS`, `GAP_LOOKBACK_DAYS`, `MAX_GAP_REPAIRS_PER_RUN` (the deploy script sets every one explicitly). Scheduler `youtube-daily-snapshot`, 23:50 America/Phoenix.
+- **`youtube-bigquery-pipeline`** (daily pipeline): entry point `main` in `main.py`; env `GCP_PROJECT`, `BQ_DATASET`, `YOUTUBE_CHANNEL_ID`, `UPLOADS_PLAYLIST_ID`, `PIPELINE_TZ`, `ANALYTICS_LOOKBACK_DAYS`, `GAP_LOOKBACK_DAYS`, `MAX_GAP_REPAIRS_PER_RUN` (the deploy script sets every one explicitly). Scheduler `youtube-daily-snapshot`, 00:10 America/Phoenix (moved from 23:50 on 2026-09-05 so the run is first in the Data API quota day, not last).
 - **`youtube-reporting-ingest`** (Reporting API): entry point `reporting_main` in `reporting_main.py`; env `GCP_PROJECT`, `BQ_DATASET`, `YOUTUBE_CHANNEL_ID`, `REPORTING_ENABLED` (kill switch, default false), `MAX_REPORTS_PER_RUN` (30), `REPORTING_STALE_DAYS` (4), `REPORTING_ARCHIVE_BUCKET`. Scheduler `youtube-reporting-daily`, 08:00 and 14:00 America/Phoenix. Deployed by `setup/9_deploy_reporting_function.sh`.
 - **Staging copies:** `youtube-bigquery-pipeline-staging` and `youtube-reporting-ingest-staging`, pointed at `youtube_analytics_staging`, no scheduler. The deploy scripts refuse both directions of a prod/staging cross.
 - **Runtime:** Python 3.11, 2nd gen, Memory: 512MB, Timeout: 540s (9 min), both functions
@@ -78,7 +78,7 @@ Two functions, one source directory (`cloud_function/`), one service account.
 - **Traffic sources:** require per-video calls (can't batch); video analytics is a single call for all videos
 - **Lookback window:** `ANALYTICS_LOOKBACK_DAYS = 5`. It was 3, which is exactly the edge of availability (T-0/T-1/T-2 return nothing, T-3 is the first populated day), so any extra day of latency produced an empty result.
 - **Self-healing gaps:** each run re-queries activity dates with no rows, within `GAP_LOOKBACK_DAYS` (21), up to `MAX_GAP_REPAIRS_PER_RUN` (5), tagged `load_source='gap_repair'`. Covers `daily_video_analytics` only; traffic-source gaps do NOT self-heal.
-- **Run date:** `PIPELINE_TZ` (America/Phoenix). Cloud Run is UTC and the job fires at 23:50 local, so `date.today()` stamped every row with the next day's date.
+- **Run date:** `PIPELINE_TZ` (America/Phoenix). Cloud Run is UTC and the job fired at 23:50 local, so `date.today()` stamped every row with the next day's date. Since 2026-09-05 the job fires at 00:10 local and stamps that calendar day; the analytics lookback is measured from it.
 - **200-row cap:** the unfiltered video report is a capped top-N report. `startIndex` does not page past it and must never be reintroduced. On hitting the cap the client re-fetches via `filters=video==` shards. Full detail in the comment block atop `youtube_analytics_api.py`.
 - **Shorts threshold:** `SHORTS_THRESHOLD_SECONDS = 180`, a module constant in `youtube_data_api.py`. Despite appearing in `.env.example`, it is NOT read from the environment.
 - **One credential loader, one retry policy:** `oauth_credentials.load_oauth_credentials` and `retry.with_retry` are the only copies. `retry.py` is stdlib-only on purpose: `main.py` skips the analytics path on `ImportError`, so nothing imported on that path may carry a dependency that could fail. The attempt count is always the caller's (function 3, backfill 5).
@@ -123,7 +123,7 @@ Pipeline is fully deployed and operational.
 - **Cloud Storage:** `<project>-youtube-reporting-raw` holds every Reporting API CSV ever downloaded (`<report_type>/<report_date>/<report_id>.csv.gz`, with sha256 and row-count metadata). It is the replay source for anything YouTube has since expired.
 - **Reporting API jobs:** 19, one per non-retired channel and playlist report type (annotations skipped, retired 2019). Ids in `.internal/OWNER_CONFIG.md`. The analytics tables are partitioned by `activity_date` and clustered by `video_id`; the two Data API tables remain on `snapshot_date`. Every analytics row carries `load_source` (`cron`, `backfill_YYYYMMDD`, `recovery_YYYYMMDD`, `gap_repair`), which is the only way to tell writers apart.
 - **Cloud Function:** `youtube-bigquery-pipeline` deployed (2nd gen, Python 3.11, 512MB, 540s timeout)
-- **Cloud Scheduler:** runs daily at 11:50 PM Phoenix time (`America/Phoenix`, no DST)
+- **Cloud Scheduler:** runs daily at 00:10 Phoenix time (`America/Phoenix`, no DST), ten minutes after the Data API quota resets
 - **OAuth2:** refresh token + client credentials stored in Secret Manager
 
 Operational specifics (initial deploy date, channel stats at build, current ingestion health) live in `.internal/OWNER_CONFIG.md`.

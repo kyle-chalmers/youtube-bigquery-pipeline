@@ -21,7 +21,10 @@ REGION="${GCP_REGION:-us-central1}"
 # capped at MAX_REPORTS_PER_RUN; two runs give headroom for 19 jobs plus regenerations.
 FUNCTION_NAME="${FUNCTION_NAME:-youtube-bigquery-pipeline}"
 JOB_NAME="${JOB_NAME:-youtube-daily-snapshot}"
-SCHEDULE="${SCHEDULE:-50 23 * * *}"
+# 00:10 Phoenix puts the pipeline FIRST in the Data API quota day (the quota resets at Pacific
+# midnight, 00:00 Phoenix); at 23:50 it was the last consumer and starved when another tool in
+# the project spent the quota (2026-08-14).
+SCHEDULE="${SCHEDULE:-10 0 * * *}"
 
 # Get the Cloud Function URL
 echo "Looking up Cloud Function URL..."
