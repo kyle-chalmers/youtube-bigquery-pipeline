@@ -114,7 +114,7 @@ For any AI agent (Claude Code, Codex, Gemini CLI, etc.) working in this repo:
 
 ## Documentation
 
-The build is complete. `README.md` contains the deployment guide and build log. Keep both files in sync with any future changes to the pipeline.
+`README.md` is the deployment guide and reference; the original build log moved to `docs/build-log.md`. Keep README and this file in sync with any change to the pipeline.
 
 ## Current Deployment Status
 
