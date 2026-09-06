@@ -93,8 +93,8 @@ Rules for the whole session:
   alert log strings. If something in the repo does not fit my channel, explain the trade-off
   and ask, rather than editing silently.
 - When done, run scripts/verify_reporting.sh and scripts/verify_views.sh against production,
-  then walk me through docs/studio-comparison.md so I can check three numbers in YouTube
-  Studio myself.
+  then walk me through docs/studio-comparison.md so I can check specific numbers against
+  YouTube Studio, the source of truth, myself.
 ```
 
 ## Where to look
