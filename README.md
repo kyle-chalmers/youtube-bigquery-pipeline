@@ -2,7 +2,7 @@
 
 Automated pipeline that lands a YouTube channel's analytics in BigQuery for trend analysis: a nightly snapshot from the Data and Analytics APIs, plus every bulk report the Reporting API produces, with twelve views on top for the growth questions YouTube Studio only shows as charts. Built for the [KC Labs AI](https://www.youtube.com/@kylechalmersdataai) channel; nothing in it is tied to that channel.
 
-> Built live on YouTube: **"I Let Claude Code Build My Entire YouTube Analytics Pipeline"** (build prompt in `PROMPT.md`, plan in `prompts/completed/`). Audited and repaired in **"I Audited the BigQuery Pipeline Claude Code Built Me. It Was Wrong."**: prompt, standing rules and takeaways in [AUDITING-YOUR-DATA-WITH-AI.md](AUDITING-YOUR-DATA-WITH-AI.md), findings in [docs/pipeline-audit-2026-08.md](docs/pipeline-audit-2026-08.md).
+> Built live on YouTube: **"I Let Claude Code Build My Entire YouTube Analytics Pipeline"** (build prompt in `PROMPT.md`, plan in `prompts/completed/`). Audited and repaired in **"I Audited the BigQuery Pipeline Claude Code Built Me. It Was Wrong."**: prompt, standing rules and takeaways in [AUDITING-YOUR-DATA-WITH-AI.md](AUDITING-YOUR-DATA-WITH-AI.md), findings in [docs/pipeline-audit-2026-08.md](docs/pipeline-audit-2026-08.md). Hardened and extended with the Reporting API in a third session, recorded as well: takeaways in [docs/hardening-session-takeaways.md](docs/hardening-session-takeaways.md).
 
 OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.github.io/youtube-bigquery-pipeline/), [Privacy Policy](https://kyle-chalmers.github.io/youtube-bigquery-pipeline/privacy.html), [Terms of Service](https://kyle-chalmers.github.io/youtube-bigquery-pipeline/terms.html).
 
