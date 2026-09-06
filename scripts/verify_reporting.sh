@@ -82,7 +82,8 @@ col() {
 gt0  "reconciliation window has shared days"               "$(col shared_days)"
 check "no day inside the window exists only in Reporting"  0 "$(col days_only_in_reporting)"
 check "no day inside the window exists only in Analytics"  0 "$(col days_only_in_analytics)"
-le "total views within 1% across shared days"              "$(col total_views_diff_share)" 0.01
+le "mean absolute daily views diff within 2% across shared days" "$(col mean_abs_daily_diff_share)" 0.02
+echo "INFO  signed net total views diff share (information only): $(col total_views_diff_share)"
 le "per-row mismatch share within 3% (about three partial days)" "$(col row_mismatch_share)" 0.03
 
 channel=$(q "$(block reconcile_views_by_channel_day "$SQL")")

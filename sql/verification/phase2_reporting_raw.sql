@@ -94,9 +94,13 @@ FROM `youtube_analytics.reporting_channel_traffic_source_a3`;
 -- way. Analytics rows with zero views are excluded from the unmatched count (the Analytics
 -- API returns them for videos with watch time but no views).
 --
--- Expected (thresholds set 2026-09-05 from the observed data, then tightened on review):
--- total_views_diff_share within 0.01, row_mismatch_share within 0.03, and
--- days_only_in_reporting = days_only_in_analytics = 0. Observed on first load against
+-- Expected (thresholds set 2026-09-05 from the observed data, then tightened on review;
+-- the total metric changed 2026-09-06 by Kyle's decision): mean_abs_daily_diff_share within
+-- 0.02 (the average over shared days of |Reporting minus Analytics| / Analytics, so an
+-- overcount on one day cannot cancel an undercount on another, which the signed net
+-- total_views_diff_share did for the 2026-08-11 partial day), row_mismatch_share within 0.03,
+-- and days_only_in_reporting = days_only_in_analytics = 0. total_views_diff_share stays as
+-- information. Observed on first load against
 -- production: totals 0.14% apart, 1.7% of shared video-days differ per row, of which 15 rows
 -- are the known 2026-08-11 partial day in daily_traffic_sources. A 3% per-row threshold trips
 -- on roughly three such partial days. The two sources are different systems: the Analytics
@@ -132,8 +136,12 @@ j AS (
          ABS(IFNULL(r.engaged_views, 0) - IFNULL(a.views, 0)) > GREATEST(5, 0.05 * IFNULL(a.views, 0)) AS engaged_off
   FROM r FULL OUTER JOIN a USING (d, video_id)
 ),
+daily AS (
+  SELECT d, SUM(reporting_views) AS rv, SUM(analytics_views) AS av FROM j GROUP BY d
+),
 agg AS (
   SELECT COUNT(*) AS joined_rows, COUNTIF(unmatched) AS unmatched_keys,
+         (SELECT AVG(SAFE_DIVIDE(ABS(IFNULL(rv, 0) - IFNULL(av, 0)), av)) FROM daily) AS mean_abs_daily_diff_share,
          SUM(reporting_views) AS reporting_views_total, SUM(analytics_views) AS analytics_views_total,
          COUNTIF(unmatched OR views_off) AS mismatched_rows, COUNTIF(unmatched OR engaged_off) AS mismatched_rows_engaged
   FROM j
@@ -143,6 +151,7 @@ SELECT win.lo AS window_start, win.hi AS window_end, win.shared_days,
        side_days.days_only_in_reporting, side_days.days_only_in_analytics,
        counts.reporting_rows, counts.analytics_rows,
        agg.joined_rows, agg.unmatched_keys, agg.reporting_views_total, agg.analytics_views_total,
+       ROUND(agg.mean_abs_daily_diff_share, 4) AS mean_abs_daily_diff_share,
        ROUND(ABS(agg.reporting_views_total - agg.analytics_views_total) / agg.analytics_views_total, 4) AS total_views_diff_share,
        ROUND(agg.mismatched_rows / agg.joined_rows, 4) AS row_mismatch_share,
        ROUND(agg.mismatched_rows_engaged / agg.joined_rows, 4) AS row_mismatch_share_engaged
