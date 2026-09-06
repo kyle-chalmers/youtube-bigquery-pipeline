@@ -9,6 +9,7 @@
 -- Expected: 4 original tables, 4 snapshots (expire 2026-09-13), 19 reporting_* tables,
 -- reporting_ingest_ledger, 12 views (and any _v1_archive tables from earlier work).
 -- ---------------------------------------------------------------------------
+-- Query: List every table, view and snapshot with its row count.
 SELECT t.table_name, t.table_type, DATE(t.creation_time) AS created,
        s.row_count, ROUND(s.size_bytes / 1e6, 2) AS mb
 FROM `youtube_analytics.INFORMATION_SCHEMA.TABLES` t
@@ -20,6 +21,7 @@ ORDER BY t.table_type, t.table_name;
 -- The pre-promotion snapshots of the four original tables and when they expire.
 -- Expected: 4 rows, expiration 7 days after 2026-09-06.
 -- ---------------------------------------------------------------------------
+-- Query: Show the pre-promotion snapshots and when they expire.
 SELECT table_name, option_value AS expires
 FROM `youtube_analytics.INFORMATION_SCHEMA.TABLE_OPTIONS`
 WHERE option_name = 'expiration_timestamp' AND table_name LIKE '%_snapshot_%'
@@ -31,6 +33,7 @@ ORDER BY table_name;
 -- and anything failed or in conflict. Expected: 19 types, failed = 0, conflicts = 0,
 -- table_rows = ledger_rows for every type.
 -- ---------------------------------------------------------------------------
+-- Query: Per report type: days loaded, date range, table rows vs ledger, failures.
 WITH ledger AS (
   SELECT report_type,
          COUNTIF(status = 'loaded') AS days_loaded,
@@ -56,6 +59,7 @@ ORDER BY t.report_type;
 -- --ledger_problems
 -- Any ledger row that needs a human. Expected: 0 rows.
 -- ---------------------------------------------------------------------------
+-- Query: Any Reporting load that failed or hit a header-only conflict.
 SELECT report_type, report_date, status, error, ingested_at
 FROM `youtube_analytics.reporting_ingest_ledger`
 WHERE status IN ('failed', 'header_only_conflict')
@@ -66,6 +70,7 @@ ORDER BY ingested_at DESC;
 -- Row count and newest day in each growth view. Expected: every view with a populated source
 -- has rows; the 16 report types created 2026-09-05 have data from 2026-08-06.
 -- ---------------------------------------------------------------------------
+-- Query: Row count and newest day in each growth view.
 SELECT 'video_current' AS v, COUNT(*) AS rows_n, NULL AS newest FROM `youtube_analytics.video_current`
 UNION ALL SELECT 'traffic_source_type_lookup', COUNT(*), NULL FROM `youtube_analytics.traffic_source_type_lookup`
 UNION ALL SELECT 'video_daily_funnel', COUNT(*), MAX(report_date) FROM `youtube_analytics.video_daily_funnel`
@@ -88,6 +93,7 @@ ORDER BY v;
 -- (copied from staging; metadata and stats carry no load_source), and 2026-09-06 onward from
 -- the refactored function at 00:10. Expected: one row per day per table with no missing day.
 -- ---------------------------------------------------------------------------
+-- Query: Last 14 to 20 days of the four original tables, by day and provenance.
 SELECT 'video_metadata' AS t, snapshot_date AS day, NULL AS load_source, COUNT(*) AS rows_n
 FROM `youtube_analytics.video_metadata` WHERE snapshot_date >= DATE_SUB(CURRENT_DATE('America/Phoenix'), INTERVAL 14 DAY) GROUP BY 1, 2
 UNION ALL SELECT 'daily_video_stats', snapshot_date, NULL, COUNT(*)
@@ -105,6 +111,7 @@ ORDER BY t, day DESC;
 -- Expected: recovery_20260829 (7 days), recovery_20260905 (2026-08-11), recovery_20260906
 -- (2026-08-31 traffic), gap_repair for anything the self-healing filled, backfill_* history.
 -- ---------------------------------------------------------------------------
+-- Query: Every non-cron partition in the two activity tables (recoveries, backfills).
 SELECT 'daily_video_analytics' AS t, load_source, COUNT(DISTINCT activity_date) AS days, MIN(activity_date) AS first_day, MAX(activity_date) AS last_day, COUNT(*) AS rows_n
 FROM `youtube_analytics.daily_video_analytics` WHERE load_source != 'cron' GROUP BY 1, 2
 UNION ALL SELECT 'daily_traffic_sources', load_source, COUNT(DISTINCT activity_date), MIN(activity_date), MAX(activity_date), COUNT(*)
@@ -117,6 +124,7 @@ ORDER BY t, last_day DESC;
 -- Expected: dup = 0 everywhere; newest snapshot = today (Phoenix); newest activity = today
 -- minus the lookback (6 days) at most.
 -- ---------------------------------------------------------------------------
+-- Query: Duplicate check and newest day for the four original tables.
 SELECT 'video_metadata' AS t, COUNT(*) AS rows_n, COUNT(*) - COUNT(DISTINCT CONCAT(snapshot_date, '|', video_id)) AS dup, MAX(snapshot_date) AS newest FROM `youtube_analytics.video_metadata`
 UNION ALL SELECT 'daily_video_stats', COUNT(*), COUNT(*) - COUNT(DISTINCT CONCAT(snapshot_date, '|', video_id)), MAX(snapshot_date) FROM `youtube_analytics.daily_video_stats`
 UNION ALL SELECT 'daily_video_analytics', COUNT(*), COUNT(*) - COUNT(DISTINCT CONCAT(activity_date, '|', video_id)), MAX(activity_date) FROM `youtube_analytics.daily_video_analytics`
