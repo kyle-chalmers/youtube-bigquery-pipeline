@@ -54,7 +54,7 @@ check "funnel clicks equal ROUND(impressions * ctr) on every row" 0 "$(col "$h" 
 avd=$(q "$(block avd_recompute_check)")
 echo "INFO  avd recompute by video type (share of single-segment video-days within 1 s of the source):"; echo "$avd" | sed 's/^/      /'
 fl=$(echo "$avd" | awk -F, '$1=="full_length"{print $3}')
-check "full-length AVD (watch time / views) reproduces the source on >= 90% of single-segment days" yes "$(num_ge "$fl" 0.90)"
+check "full-length AVD over views reproduces the source column on >= 90% of single-segment days" yes "$(num_ge "$fl" 0.90)"
 
 rec=$(q "$(block summary_reconciles_to_sources)"); h=$(echo "$rec" | head -1); r=$(echo "$rec" | tail -1)
 echo "INFO  summary vs sources: $r"

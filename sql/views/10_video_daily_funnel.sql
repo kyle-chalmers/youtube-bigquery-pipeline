@@ -13,16 +13,16 @@
 --     include traffic that had no impression, e.g. external links, search suggestions). The
 --     source occasionally reports ctr above 1 on a 1-impression row (observed once: 2 clicks on
 --     1 impression), so clicks can exceed impressions on such rows.
---   avg_view_duration_seconds = watch_time_minutes * 60 / views. This is YouTube Studio's
---     stated definition (watch time over views). On full-length videos it reproduces the
---     source's per-row average_view_duration_seconds within 1 s on 96% of single-segment
---     video-days (observed 2026-09-05). On Shorts it does not: the source reports
---     average_view_duration_seconds = 0 whenever engaged_views = 0 even with positive watch
---     time (1,226 of 1,264 such rows), and a Shorts view has counted any start or replay since
---     2025-03-31. The per-engaged-view variant is exposed too and the Studio spot-check decides
---     which one Studio shows for Shorts.
---   avg_view_duration_per_engaged_view_seconds = watch_time_minutes * 60 / engaged_views.
---   avg_view_percentage = avg_view_duration_seconds / duration_seconds * 100; can exceed
+--   avg_view_duration_seconds = watch_time_minutes * 60 / engaged_views. This is what YouTube
+--     Studio shows as "Average view duration" for long-form AND Shorts (Studio spot-check
+--     2026-09-02, four videos: Studio 2:44 / 5:31 / 1:31 / 0:18 vs this column 168 / 332 / 93 /
+--     20 s; the views-denominator column gave 64 / 222 / 53 / 10 s, so it is NOT Studio's number).
+--   avg_view_duration_over_views_seconds = watch_time_minutes * 60 / views, kept because the
+--     Reporting API's own per-row average_view_duration_seconds follows THIS definition on
+--     full-length videos (96% of single-segment days within 1 s) and because the source
+--     reports 0 whenever engaged_views = 0 even with positive watch time.
+--   avg_view_percentage = avg_view_duration_over_views_seconds / duration_seconds * 100 (the
+--     source's own scale, not Studio's "average percentage viewed"); can exceed
 --     100 on looped playback of any video type (observed up to 497 on a full-length video),
 --     exactly as in the source.
 --   engaged_start_share = engaged_views / views. Since 2025-03-31 a Shorts `view` counts any
@@ -72,8 +72,8 @@ SELECT k.report_date, k.video_id,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.views) AS views,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.engaged_views) AS engaged_views,
        IF(a.report_date IS NULL AND ad.report_date IS NOT NULL, 0, a.watch_time_minutes) AS watch_time_minutes,
-       SAFE_DIVIDE(a.watch_time_minutes * 60, a.views) AS avg_view_duration_seconds,
-       SAFE_DIVIDE(a.watch_time_minutes * 60, a.engaged_views) AS avg_view_duration_per_engaged_view_seconds,
+       SAFE_DIVIDE(a.watch_time_minutes * 60, a.engaged_views) AS avg_view_duration_seconds,
+       SAFE_DIVIDE(a.watch_time_minutes * 60, a.views) AS avg_view_duration_over_views_seconds,
        SAFE_DIVIDE(a.watch_time_minutes * 60, a.views) / NULLIF(v.duration_seconds, 0) * 100 AS avg_view_percentage,
        SAFE_DIVIDE(a.engaged_views, a.views) AS engaged_start_share,
        SAFE_DIVIDE(a.views_from_non_subscribers, a.views) AS non_subscriber_view_share,

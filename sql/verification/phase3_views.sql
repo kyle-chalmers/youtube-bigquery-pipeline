@@ -73,13 +73,14 @@ FROM `youtube_analytics.video_daily_funnel`;
 
 -- ---------------------------------------------------------------------------
 -- --avd_recompute_check
--- On video-days where the source has a single segment row, compare the view's recomputed
--- average view duration against the source's own average_view_duration_seconds, by video type
--- and by denominator. Observed 2026-09-05: full-length matches watch_time/views within 1 s on
--- 96% of rows; Shorts match watch_time/engaged_views on 73% and neither cleanly, because a
--- Shorts view has counted any start or replay since 2025-03-31. The view exposes both
--- definitions; the Studio spot-check decides which one Studio shows.
--- Expected: full_length match_share_views >= 0.90. Shorts rows are informational.
+-- On video-days where the source has a single segment row, compare the view's two AVD columns
+-- against the source's own per-row average_view_duration_seconds, by video type. Observed
+-- 2026-09-05: the SOURCE column follows watch_time/views on full-length (96% within 1 s) and
+-- neither denominator cleanly on Shorts (source reports 0 when engaged_views = 0). YouTube
+-- STUDIO, checked the same day, shows watch_time/engaged_views for both, so the view's
+-- avg_view_duration_seconds is the engaged-view definition and the views-denominator column is
+-- kept as avg_view_duration_over_views_seconds for reconciling to the raw table.
+-- Expected: full_length match_share_over_views >= 0.90. Shorts rows are informational.
 -- ---------------------------------------------------------------------------
 WITH single AS (
   SELECT b.report_date, b.video_id, IFNULL(v.video_type, 'unknown') AS video_type,
@@ -90,8 +91,8 @@ WITH single AS (
   GROUP BY 1, 2, 3 HAVING COUNT(*) = 1
 )
 SELECT s.video_type, COUNT(*) AS single_segment_video_days,
-       ROUND(COUNTIF(ABS(f.avg_view_duration_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_views,
-       ROUND(COUNTIF(ABS(f.avg_view_duration_per_engaged_view_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_engaged
+       ROUND(COUNTIF(ABS(f.avg_view_duration_over_views_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_over_views,
+       ROUND(COUNTIF(ABS(f.avg_view_duration_seconds - s.src_avd) <= 1) / COUNT(*), 3) AS match_share_engaged
 FROM single s JOIN `youtube_analytics.video_daily_funnel` f USING (report_date, video_id)
 GROUP BY 1 ORDER BY 1;
 
@@ -179,7 +180,7 @@ WITH day AS (SELECT MAX(report_date) AS d FROM `youtube_analytics.video_daily_fu
 SELECT report_date AS pacific_day, video_id, title,
        views AS studio_views,
        ROUND(watch_time_minutes / 60, 2) AS studio_watch_time_hours,
-       CAST(ROUND(avg_view_duration_seconds) AS INT64) AS studio_avg_view_duration_seconds,
+       CAST(ROUND(avg_view_duration_seconds) AS INT64) AS studio_avg_view_duration_seconds,  -- watch time / engaged views, Studio's definition
        impressions AS studio_impressions,
        ROUND(ctr * 100, 1) AS studio_impressions_ctr_pct,
        net_subscribers AS studio_subscribers

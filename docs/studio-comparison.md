@@ -38,9 +38,23 @@ Compare against the Reporting tables and the views built on them, never against 
 days old with columns in Studio's Advanced Mode order (Views, Watch time hours, Average view duration,
 Impressions, Impressions CTR, Subscribers), so the two can sit side by side on screen.
 
-**Status (2026-09-05): the spot-check has not been performed yet.** It needs YouTube Studio, which the agent
-cannot open, so the channel owner runs it. Record the observed differences here when done, including which
-AVD definition Studio matched on Shorts.
+**Status: spot-check performed 2026-09-05 by the channel owner against staging** (report_date 2026-09-02,
+and 2026-08-27 to 09-02 for the daily series). Results, with the rule each one produced:
+
+| Check | Studio | Warehouse | Verdict |
+|---|---|---|---|
+| Three videos, one day: views, watch hours, impressions, CTR, subscribers | 103 / 1.8 h / 306 / 8.5% / 0; 60 / 0.9 h / 163 / 16.0% / 0; 54 / 3.3 h / 319 / 4.4% / 0 | 103 / 1.82 / 306 / 8.5 / 0; 60 / 0.88 / 163 / 16.0 / 0; 54 / 3.32 / 319 / 4.4 / 0 | exact |
+| Same three videos, Average view duration | 2:44, 1:31, 5:31 | over engaged views 168 s, 93 s, 332 s; over views 64 s, 53 s, 222 s | **Studio's AVD is watch time over engaged views.** Within 4 s (Studio rounds watch time). The views-denominator number is not what Studio shows. |
+| Short "When AI Asks for a Second Opinion", one day | 35 views, 18 engaged, 0:18 | 35, 18, 20.3 s over engaged (6.08 min) | same definition as long-form; the 2 s gap is watch-time rounding on a 0.1 h total |
+| Channel day totals for 2026-09-02: engaged views, impressions, CTR, subscribers, watch hours | 327 / 2,958 / 5.3% / 5 / 16.6 | 327 / 2958 / 5.3% / 5 / 16.6 | exact |
+| Channel views by date, 7 days | 554, 575, 453, 455, 708, 623, 672 | 558, 588, 453, 455, 704, 623, 672 | 4 of 7 exact; 08-27 +4, 08-28 +13 (2.2%), 08-31 minus 4. YouTube has NOT regenerated those reports (checked with a dry-run listing the same day), so this is Studio's live counter drifting from the report as generated, in both directions |
+| One video, traffic sources, 28 days | search 1,091, direct 110, suggested 82, browse 81, external 61, other 21 | 1,089, 109, 83, 80, 61, 20 | within 2 views per source, same cause as the row above |
+
+Rules that came out of it:  in  is now watch time over engaged
+views (Studio's definition) and the views-denominator version is ; a
+day's views can differ from Studio by up to about 2 percent without any report having been regenerated, so
+the automated reconciliation tolerances (1 percent of total, 3 percent of rows) stand; and the newest-generation
+rule is doing its job (the two days that had two generations are the ones that match exactly).
 
 ## What will not match, so nobody chases it
 
