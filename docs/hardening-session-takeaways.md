@@ -69,6 +69,41 @@ data pipeline with an agent doing the work.
 - **Public repo, private values.** Project, channel and job ids live in a gitignored folder; a tracked
   file that held a channel id from the original build was cleaned up on the way through.
 
+## Do this for your own channel
+
+Nothing in this repo is tied to my channel. The full path for another channel owner is
+[docs/adopt-for-your-channel.md](adopt-for-your-channel.md): what you need, the order of steps and why each
+one comes before the next, what to change and what to leave alone, and the traps found during the build.
+It ends with this prompt, which you paste into your coding agent in your clone of the repo:
+
+```text
+I want to run this repository's pipeline for my own YouTube channel. Work with me through it.
+
+First, read CLAUDE.md, README.md (the Architecture, Why Three YouTube APIs, BigQuery Schema and
+Deployment sections), docs/adopt-for-your-channel.md, .env.example and the setup/ scripts, in
+that order. Then tell me in plain language what this pipeline will collect for my channel, what
+it will cost, and what accounts and permissions it needs, before running anything.
+
+Rules for the whole session:
+- Ask me for values you cannot derive: my channel id, GCP project id, region, alert email, and
+  whether the channel and the cloud project are different Google accounts. Put them in .env and
+  in .internal/OWNER_CONFIG.md only; never in a tracked file, a commit message, or a log.
+- Run the setup in the order docs/adopt-for-your-channel.md gives, one step at a time, showing
+  me each command before it runs and its result after. Stop and tell me when a step needs
+  something only I can do (the OAuth consent screen in a browser, enabling billing).
+- Create the Reporting API jobs and run the archive script before anything else that can wait;
+  reports expire.
+- Deploy to the staging dataset and staging functions first, run both verify scripts there,
+  and show me the results. Only propose the production steps after staging is green, and ask
+  me before each production deploy or scheduler change.
+- Do not change the writer's delete-then-load invariants, the transaction assertions, or the
+  alert log strings. If something in the repo does not fit my channel, explain the trade-off
+  and ask, rather than editing silently.
+- When done, run scripts/verify_reporting.sh and scripts/verify_views.sh against production,
+  then walk me through docs/studio-comparison.md so I can check three numbers in YouTube
+  Studio myself.
+```
+
 ## Where to look
 
 - `README.md` for the architecture, the deployment order and the schema.
