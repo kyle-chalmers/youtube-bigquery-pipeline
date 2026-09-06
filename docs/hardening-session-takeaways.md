@@ -48,8 +48,8 @@ data pipeline with an agent doing the work.
 5. **Reconcile against the system of record, then read the definitions before you trust the numbers.**
    Two sources that both look right can disagree by a few percent for documented reasons, and a metric can
    change meaning under you without history being restated. Keep the raw values, expose ratios on every
-   defensible denominator, and name the series that is stable across the change. Here: a three-video check
-   against YouTube Studio showed average view duration uses engaged views, and that "view" changed meaning
+   defensible denominator, and name the series that is stable across the change. Here: checking specific
+   videos against YouTube Studio showed average view duration uses engaged views, and that "view" changed meaning
    on 2026-08-24; both confirmed in YouTube's own documentation.
 
 ## Smaller lessons
