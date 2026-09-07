@@ -19,12 +19,27 @@ REGION="${GCP_REGION:-us-central1}"
 #   FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE="0 8,14 * * *" bash setup/5_create_scheduler.sh
 # Twice a day because each report takes about 15 s to load transactionally and a run is
 # capped at MAX_REPORTS_PER_RUN; two runs give headroom for 19 jobs plus regenerations.
+#
+# The Analytics refresh job gets its own job weekly, deliberately far from the 00:10
+# daily run (see the soft-guard invariant documented at the top of
+# cloud_function/analytics_refresh.py — this schedule separation is the only thing that
+# keeps it from racing the daily function's gap repair on the same BigQuery partitions):
+#   FUNCTION_NAME=youtube-analytics-refresh JOB_NAME=youtube-analytics-refresh-weekly \
+#   SCHEDULE="0 3 * * 0" ATTEMPT_DEADLINE=1800s MAX_RETRY_ATTEMPTS=0 bash setup/5_create_scheduler.sh
+# MAX_RETRY_ATTEMPTS=0 is load-bearing, not a stylistic choice: Cloud Run does not cancel
+# a still-running invocation just because Scheduler gave up waiting on it, so a retry
+# after a slow refresh run would start a second run against the same partitions the first
+# one is still writing to. ATTEMPT_DEADLINE must be set to at least the refresh
+# function's own deployed --timeout, or Scheduler gives up (and, if retries were nonzero,
+# would retry) before a legitimately long run finishes.
 FUNCTION_NAME="${FUNCTION_NAME:-youtube-bigquery-pipeline}"
 JOB_NAME="${JOB_NAME:-youtube-daily-snapshot}"
 # 00:10 Phoenix puts the pipeline FIRST in the Data API quota day (the quota resets at Pacific
 # midnight, 00:00 Phoenix); at 23:50 it was the last consumer and starved when another tool in
 # the project spent the quota (2026-08-14).
 SCHEDULE="${SCHEDULE:-10 0 * * *}"
+ATTEMPT_DEADLINE="${ATTEMPT_DEADLINE:-600s}"
+MAX_RETRY_ATTEMPTS="${MAX_RETRY_ATTEMPTS:-3}"
 
 # Get the Cloud Function URL
 echo "Looking up Cloud Function URL..."
@@ -45,7 +60,7 @@ echo "Service account: $SERVICE_ACCOUNT"
 echo ""
 echo "Creating Cloud Scheduler job: $JOB_NAME"
 echo "  Schedule: $SCHEDULE America/Phoenix (no DST)"
-echo "  Retries:  3 with exponential backoff (30s–300s)"
+echo "  Attempt deadline: $ATTEMPT_DEADLINE   Retries: $MAX_RETRY_ATTEMPTS with exponential backoff (30s–300s)"
 echo ""
 
 # Idempotent: update the job if it exists, create it otherwise.
@@ -63,8 +78,8 @@ gcloud scheduler jobs "$VERB" http "$JOB_NAME" \
     --http-method=POST \
     --oidc-service-account-email="$SERVICE_ACCOUNT" \
     --oidc-token-audience="$FUNCTION_URL" \
-    --attempt-deadline=600s \
-    --max-retry-attempts=3 \
+    --attempt-deadline="$ATTEMPT_DEADLINE" \
+    --max-retry-attempts="$MAX_RETRY_ATTEMPTS" \
     --min-backoff=30s \
     --max-backoff=300s \
     --project="$PROJECT_ID"

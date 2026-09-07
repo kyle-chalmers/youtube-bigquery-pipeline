@@ -55,6 +55,10 @@ echo "Creating tables from DDL (CREATE TABLE IF NOT EXISTS)..."
 GCP_PROJECT="$PROJECT_ID" BQ_DATASET="$DST" GCP_REGION="$LOCATION" bash "$SCRIPT_DIR/2_create_bigquery.sh" >/dev/null
 
 echo ""
+# The refresh archive tables are append-only and start empty in prod too (they only
+# ever gain rows once the trailing-30-day refresh job runs), so they are created here
+# but deliberately NOT copied from prod — there is nothing to copy yet, and copying an
+# empty table would be a no-op anyway.
 for table in video_metadata daily_video_stats daily_video_analytics daily_traffic_sources; do
     echo "Copying $SRC.$table -> $DST.$table"
     bq --project_id="$PROJECT_ID" cp --force --quiet "$SRC.$table" "$DST.$table"

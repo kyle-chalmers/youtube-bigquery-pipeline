@@ -14,10 +14,11 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 
 ![Architecture](docs/diagrams/pipeline-after-hardening-2026-09.png)
 
-Two Cloud Functions (2nd gen, Python 3.11) built from one source directory, each with its own Cloud Scheduler job:
+Two Cloud Functions (2nd gen, Python 3.11) built from one source directory, each with its own Cloud Scheduler job, plus a third staged for prod promotion:
 
 - **`youtube-bigquery-pipeline`**, nightly at 00:10 Phoenix (ten minutes after the Data API quota resets). Fetches the video catalogue and public counters from the Data API, and per-video metrics and traffic sources for the activity day six days back from the Analytics API. Writes the four original tables with a delete-then-load keyed on the activity date that refuses to delete when the API returned nothing; re-queries recent activity days that have no rows.
 - **`youtube-reporting-ingest`**, 08:00 and 14:00 Phoenix. Lists every report YouTube still retains for the channel's 19 Reporting API jobs, compares with a ledger, archives each new file to Cloud Storage, parses by header name, and replaces that day's partition in one BigQuery transaction guarded by assertions (rows present, one expected date, the configured channel, unique grain, no newer generation already loaded). A header-only report never deletes a populated day. `REPORTING_ENABLED` is a kill switch.
+- **`youtube-analytics-refresh`** (not yet promoted to prod — proven in staging first, per `setup/refresh_analytics.py`), weekly, scheduled far from the 00:10 daily run on purpose. Re-fetches the trailing ~30 activity days and overwrites `daily_video_analytics`/`daily_traffic_sources` so revisions YouTube makes after the fact (up to ~30 days) are picked up, archiving the pre-refresh rows first. Its schedule separation from the daily function's gap repair is a deliberate, documented tradeoff, not an oversight — see `cloud_function/analytics_refresh.py`'s module docstring.
 
 Secrets (API key, OAuth client, refresh token) live in Secret Manager. One refresh token with the `yt-analytics.readonly` scope serves both the Analytics and the Reporting API, so the channel account and the cloud project can be different Google accounts. Everything runs inside the GCP free tier.
 

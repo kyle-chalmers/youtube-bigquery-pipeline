@@ -13,16 +13,21 @@ set -euo pipefail
 #                               report tried to supersede a populated day
 #   youtube-reporting-stale     the ingest itself found a report type whose newest loaded day is older
 #                               than REPORTING_STALE_DAYS (a job stopped generating, or auth broke quietly)
+#   youtube-refresh-failure     the trailing-30-day Analytics refresh crashed entirely, or refused/
+#                               skipped one or more days (partial fetch errors, or a suspiciously low
+#                               row count) — see analytics_refresh.py's soft-guard invariant comment
 #   youtube-scheduler-failure   Cloud Scheduler reported a non-2xx or a timeout for any job here
 #
 # Requires: ALERT_EMAIL. Optional: FUNCTION_NAME (default youtube-bigquery-pipeline),
-# REPORTING_FUNCTION_NAME (default youtube-reporting-ingest), POLICY_SUFFIX (e.g. "-staging"
-# to create a parallel set of policies against the staging functions for a live test).
+# REPORTING_FUNCTION_NAME (default youtube-reporting-ingest), REFRESH_FUNCTION_NAME
+# (default youtube-analytics-refresh), POLICY_SUFFIX (e.g. "-staging" to create a
+# parallel set of policies against the staging functions for a live test).
 
 PROJECT_ID="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 : "${PROJECT_ID:?no GCP project: set GCP_PROJECT or gcloud config set project}"
 FUNCTION_NAME="${FUNCTION_NAME:-youtube-bigquery-pipeline}"
 REPORTING_FUNCTION_NAME="${REPORTING_FUNCTION_NAME:-youtube-reporting-ingest}"
+REFRESH_FUNCTION_NAME="${REFRESH_FUNCTION_NAME:-youtube-analytics-refresh}"
 POLICY_SUFFIX="${POLICY_SUFFIX:-}"
 CHANNEL_DISPLAY_NAME="youtube-pipeline-alerts"
 
@@ -110,6 +115,11 @@ upsert_policy "youtube-reporting-stale${POLICY_SUFFIX}" \
     "Reporting freshness stale log entry" \
     "$(log_filter "$REPORTING_FUNCTION_NAME" "Reporting freshness stale")" \
     "The Reporting ingest ran but its newest loaded report day is older than REPORTING_STALE_DAYS (normal latency is about 2 days). Causes in order of likelihood: YouTube has not generated new reports (check jobs.reports.list via setup/archive_reporting_raw.py --dry-run), a job expired (jobs.list expireTime), or the credential lists zero reports without raising. If jobs show reports the ledger lacks, run setup/backfill_reporting.py against the dataset."
+
+upsert_policy "youtube-refresh-failure${POLICY_SUFFIX}" \
+    "Analytics refresh failure log entry" \
+    "$(log_filter "$REFRESH_FUNCTION_NAME" "Analytics refresh failed entirely" "refresh_incomplete")" \
+    "The trailing-30-day Analytics refresh ($REFRESH_FUNCTION_NAME) hit a problem. Two cases: (1) 'failed entirely' means the run crashed before completing, usually auth or BigQuery; (2) 'refresh_incomplete' is logged once per activity_date/table the run skipped rather than wrote, for one of three reasons stated in the same log line: per-video fetch errors (a partial day is never written over a complete one), a fetch that came back empty after previously having rows (possible single-metric-zeroing on the Analytics API, not necessarily a real revision to zero), or a row count the transaction judged suspiciously low relative to what was already there. None of these lose data — the existing partition is always left untouched on any of these paths. A skipped day is retried automatically on the next scheduled run, since the window is recomputed fresh each time. This function assumes it never runs concurrently with the daily pipeline's gap repair (see the soft-guard invariant in cloud_function/analytics_refresh.py's module docstring) — if that separation is ever violated, watch for duplicate rows in daily_video_analytics/daily_traffic_sources instead, which this alert does not catch."
 
 # A run that never happened, or was killed by a timeout, emits no log string at all. Cloud
 # Scheduler logs an ERROR when the target returns non-2xx or times out; match that too.

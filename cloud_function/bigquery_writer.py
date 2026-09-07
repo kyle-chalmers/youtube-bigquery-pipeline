@@ -6,12 +6,32 @@ Handles idempotent writes to all 4 tables using DELETE + batch load pattern.
 import io
 import json
 import logging
-from datetime import date
+import time
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from google.cloud import bigquery
 
+from log_safety import redact
+
 logger = logging.getLogger(__name__)
+
+# Used only by archive_and_replace (the trailing-30-day refresh job). Retry policy
+# mirrors partition_replacer.py's StagedTransactionalReplacer, which solves the same
+# "stage then transact" problem for the Reporting tables — same transient-error
+# vocabulary, not a shared import, since that module is coupled to the reporting ledger
+# and this one isn't.
+_REFRESH_TRANSIENT_MARKERS = (
+    "concurrent", "transaction is aborted", "abort", "backenderror",
+    "internalerror", "ratelimitexceeded",
+)
+_REFRESH_TRANSIENT_RETRIES = 3
+_REFRESH_TRANSIENT_BACKOFF_SECONDS = (5, 10, 20)
+
+
+class ReplaceRefused(RuntimeError):
+    """archive_and_replace's transaction refused to commit; nothing was written."""
 
 
 class BigQueryWriter:
@@ -169,6 +189,200 @@ class BigQueryWriter:
             ]
         )
         return [row[0] for row in self.client.query(query, job_config=job_config).result()]
+
+    def count_rows_for_activity_date(self, table_name: str, activity_date: date) -> int:
+        """Row count for one activity_date partition.
+
+        Used by the trailing-30-day refresh job to tell "this day was already empty"
+        (expected, INFO) apart from "this day had rows and a re-fetch came back empty"
+        (the documented single-metric-zeroing failure mode, WARNING) — both leave the
+        partition untouched, but only one is worth flagging.
+        """
+        query = (
+            f"SELECT COUNT(*) FROM `{self.dataset_ref}.{table_name}` "
+            f"WHERE activity_date = @activity_date"
+        )
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("activity_date", "DATE", str(activity_date))
+            ]
+        )
+        return next(iter(self.client.query(query, job_config=job_config).result()))[0]
+
+    def archive_and_replace(
+        self,
+        table_name: str,
+        archive_table: str,
+        new_rows: list[dict[str, Any]],
+        activity_date: date,
+        snapshot_date: date,
+        load_source: str,
+        refresh_run_id: str,
+        min_row_ratio: float,
+    ) -> int:
+        """Atomically archive an activity_date partition, then replace it with new_rows.
+
+        Used only by the trailing-30-day refresh job (cloud_function/analytics_refresh.py),
+        never by the daily cron or gap repair — those keep the plain _delete_and_insert
+        two-step, which is fine for them because they only ever touch empty or
+        just-collected partitions, not partitions being revised out from under other
+        readers. This method exists because refreshing a day that already has rows needs
+        stronger guarantees: a crash between archiving and replacing must not lose data
+        either way, and an API response that's merely smaller (not empty, not erroring)
+        must not silently replace good data with worse data.
+
+        Everything happens in one BigQuery script transaction: assert the new row count
+        isn't suspiciously low relative to what's there now, archive the existing rows,
+        delete them, insert the new ones. A failed assertion rolls back the whole thing.
+        This is a smaller, purpose-built cousin of partition_replacer.py's
+        StagedTransactionalReplacer (same stage-then-transact shape, same retry
+        vocabulary) without that module's reporting-ledger coupling.
+
+        Soft-guard note: this method makes ITS OWN operation atomic. It does not protect
+        against a genuinely concurrent writer (e.g. the daily cron's gap repair touching
+        the same activity_date at the same time) — that risk is accepted and mitigated by
+        scheduling, not by a lock. See the module docstring in analytics_refresh.py.
+
+        Args:
+            table_name: Live table, e.g. "daily_video_analytics".
+            archive_table: Where the pre-replace rows go, e.g.
+                "daily_video_analytics_refresh_archive".
+            new_rows: Freshly fetched rows for activity_date. Must be non-empty — the
+                caller's own zero-row guard decides whether to call this at all.
+            activity_date: The day being refreshed.
+            snapshot_date: The day this refresh run happened (stamped like any other write).
+            load_source: Provenance tag, e.g. "refresh_20260913".
+            refresh_run_id: Correlates every row this invocation touches with the run
+                that touched it, and is what the before/after diff query filters on.
+            min_row_ratio: Refuse the replacement if the new row count is below this
+                fraction of the existing row count for the day. This threshold is a
+                business-rule decision, not a code default — callers must pass it
+                explicitly (see REFRESH_MIN_ROW_RATIO in analytics_refresh.py).
+
+        Returns:
+            Number of rows written.
+
+        Raises:
+            ValueError: new_rows is empty.
+            ReplaceRefused: the transaction's own assertions refused to commit.
+        """
+        if not new_rows:
+            raise ValueError(
+                "archive_and_replace requires non-empty new_rows; the zero-row guard "
+                "belongs in the caller, not here"
+            )
+
+        table_ref = f"{self.dataset_ref}.{table_name}"
+        archive_ref = f"{self.dataset_ref}.{archive_table}"
+
+        for row in new_rows:
+            row["activity_date"] = str(activity_date)
+            row["snapshot_date"] = str(snapshot_date)
+            row["load_source"] = load_source
+
+        live_schema = self.client.get_table(table_ref).schema
+        columns = [field.name for field in live_schema]
+        col_list = ", ".join(columns)
+
+        work_table = f"_refresh_{table_name}_{uuid.uuid4().hex[:8]}"
+        work_ref = f"{self.dataset_ref}.{work_table}"
+
+        try:
+            self._stage_refresh_rows(work_ref, live_schema, new_rows)
+            script = f"""
+BEGIN
+  BEGIN TRANSACTION;
+
+  IF (SELECT COUNT(*) FROM `{work_ref}`) <
+     @min_row_ratio * (SELECT COUNT(*) FROM `{table_ref}` WHERE activity_date = @activity_date)
+  THEN
+    RAISE USING MESSAGE = 'refused: new row count is below min_row_ratio of the existing count';
+  END IF;
+
+  INSERT INTO `{archive_ref}` ({col_list}, archived_at, refresh_run_id)
+  SELECT {col_list}, CURRENT_TIMESTAMP(), @refresh_run_id
+  FROM `{table_ref}` WHERE activity_date = @activity_date;
+
+  DELETE FROM `{table_ref}` WHERE activity_date = @activity_date;
+
+  INSERT INTO `{table_ref}` ({col_list})
+  SELECT {col_list} FROM `{work_ref}`;
+
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE USING MESSAGE = @@error.message;
+END;
+"""
+            params = [
+                bigquery.ScalarQueryParameter("activity_date", "DATE", str(activity_date)),
+                bigquery.ScalarQueryParameter("refresh_run_id", "STRING", refresh_run_id),
+                bigquery.ScalarQueryParameter("min_row_ratio", "FLOAT64", min_row_ratio),
+            ]
+            self._run_transactional_script_with_retry(script, params)
+        finally:
+            self._drop_work_table(work_ref)
+
+        logger.info(
+            f"archive_and_replace: {table_name} activity_date={activity_date} "
+            f"replaced with {len(new_rows)} rows (refresh_run_id={refresh_run_id})"
+        )
+        return len(new_rows)
+
+    def _stage_refresh_rows(
+        self, work_ref: str, schema: list[bigquery.SchemaField], rows: list[dict[str, Any]]
+    ) -> None:
+        """Load rows into a real, expiring work table with the live table's own schema.
+
+        BigQuery CREATE TEMP TABLE cannot back a load job and DDL cannot run inside a
+        transaction, so this is a real table — random-suffixed name, expiry set at
+        creation so a crash before _drop_work_table runs still cleans up within an hour.
+        An explicit schema (not NDJSON autodetect) matters here specifically because
+        autodetect would type activity_date as STRING, which then fails to UNION/INSERT
+        against the live table's DATE column.
+        """
+        table = bigquery.Table(work_ref, schema=schema)
+        table.expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        self.client.create_table(table)
+        json_data = "\n".join(json.dumps(row) for row in rows)
+        load_job_config = bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            schema=schema,
+        )
+        self.client.load_table_from_file(
+            io.BytesIO(json_data.encode()), work_ref, job_config=load_job_config
+        ).result()
+
+    def _drop_work_table(self, work_ref: str) -> None:
+        try:
+            self.client.delete_table(work_ref, not_found_ok=True)
+        except Exception as e:  # noqa: BLE001 - it expires within the hour regardless
+            logger.warning(f"could not drop refresh work table {work_ref}: {redact(str(e))}")
+
+    def _run_transactional_script_with_retry(
+        self, script: str, params: list[Any]
+    ) -> None:
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        for attempt in range(_REFRESH_TRANSIENT_RETRIES + 1):
+            try:
+                self.client.query(script, job_config=job_config).result()
+                return
+            except Exception as e:  # noqa: BLE001 - classified below
+                msg = str(e)
+                low = msg.lower()
+                if "refused:" in low:
+                    raise ReplaceRefused(msg) from e
+                if any(m in low for m in _REFRESH_TRANSIENT_MARKERS) and attempt < _REFRESH_TRANSIENT_RETRIES:
+                    wait = _REFRESH_TRANSIENT_BACKOFF_SECONDS[attempt]
+                    logger.warning(
+                        f"transient BigQuery error in archive_and_replace, retrying in "
+                        f"{wait}s (attempt {attempt + 1}/{_REFRESH_TRANSIENT_RETRIES}): "
+                        f"{redact(msg[:200])}"
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
 
     def _delete_and_insert(
         self,

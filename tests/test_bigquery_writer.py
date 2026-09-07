@@ -4,14 +4,21 @@
    response destroyed activity 2026-02-22/23/24 on 2026-05-25.
 2. The analytics tables key the DELETE on activity_date, not snapshot_date. Recovered
    history shares one collection date, so a snapshot-keyed delete would erase it all.
+
+Also covers archive_and_replace (the trailing-30-day refresh job's atomic write path):
+archive-before-delete-before-insert ordering, explicit column lists, refresh_run_id and
+min_row_ratio threaded as query parameters, ReplaceRefused on a refused transaction, and
+transient-error retry.
 """
 
 import json
+import time
 from datetime import date
 
 import pytest
+from google.cloud import bigquery
 
-from bigquery_writer import BigQueryWriter
+from bigquery_writer import BigQueryWriter, ReplaceRefused
 
 
 class FakeJob:
@@ -124,6 +131,178 @@ def test_snapshot_tables_key_delete_on_snapshot_date(writer):
 def test_load_source_defaults_to_cron(writer):
     writer.write_daily_video_analytics([{"video_id": "v1"}], date(2026, 9, 4), date(2026, 8, 30))
     assert writer.client.events[2][2][0]["load_source"] == "cron"
+
+
+def test_count_rows_for_activity_date_parameterises_query(writer):
+    captured = {}
+
+    class R:
+        def result(self):
+            return iter([[7]])
+
+    def fake_query(sql, job_config=None):
+        captured["sql"] = sql
+        captured["params"] = {p.name: str(p.value) for p in job_config.query_parameters}
+        return R()
+
+    writer.client.query = fake_query
+    assert writer.count_rows_for_activity_date("daily_video_analytics", date(2026, 8, 20)) == 7
+    assert "`proj.ds.daily_video_analytics`" in captured["sql"]
+    assert "WHERE activity_date = @activity_date" in captured["sql"]
+    assert captured["params"] == {"activity_date": "2026-08-20"}
+
+
+class _FakeTable:
+    def __init__(self, schema):
+        self.schema = schema
+
+
+class ArchiveReplaceFakeClient:
+    """Like FakeClient, but supports the calls archive_and_replace needs: get_table,
+    create_table, delete_table, plus a query() that can be told to raise on the
+    transactional-script call to simulate a BigQuery RAISE or a transient failure."""
+
+    # Real SchemaField objects: archive_and_replace passes this straight into a real
+    # bigquery.Table(schema=...) constructor, which validates its input.
+    LIVE_SCHEMA = [
+        bigquery.SchemaField("activity_date", "DATE"),
+        bigquery.SchemaField("snapshot_date", "DATE"),
+        bigquery.SchemaField("video_id", "STRING"),
+        bigquery.SchemaField("load_source", "STRING"),
+        bigquery.SchemaField("estimated_minutes_watched", "FLOAT64"),
+    ]
+
+    def __init__(self, query_side_effects=None):
+        self.events = []
+        self._query_side_effects = list(query_side_effects or [])
+
+    def get_table(self, table_ref):
+        self.events.append(("get_table", table_ref))
+        return _FakeTable(self.LIVE_SCHEMA)
+
+    def create_table(self, table):
+        self.events.append(("create_table", table.table_id if hasattr(table, "table_id") else str(table)))
+        return table
+
+    def load_table_from_file(self, fh, table_ref, job_config=None):
+        rows = [json.loads(line) for line in fh.read().decode().splitlines()]
+        self.events.append(("load", table_ref, rows))
+        return FakeJob(self.events, "load")
+
+    def delete_table(self, table_ref, not_found_ok=True):
+        self.events.append(("delete_table", table_ref))
+
+    def query(self, sql, job_config=None):
+        params = {p.name: str(p.value) for p in (job_config.query_parameters if job_config else [])}
+        self.events.append(("query", sql, params))
+        if self._query_side_effects:
+            effect = self._query_side_effects.pop(0)
+            if isinstance(effect, Exception):
+                class RaisingJob:
+                    def result(self_inner):
+                        raise effect
+                return RaisingJob()
+        return FakeJob(self.events, "query")
+
+
+@pytest.fixture
+def archive_writer():
+    w = BigQueryWriter.__new__(BigQueryWriter)
+    w.client = ArchiveReplaceFakeClient()
+    w.dataset_ref = "proj.ds"
+    return w
+
+
+def test_archive_and_replace_requires_non_empty_rows(archive_writer):
+    with pytest.raises(ValueError):
+        archive_writer.archive_and_replace(
+            table_name="daily_video_analytics", archive_table="daily_video_analytics_refresh_archive",
+            new_rows=[], activity_date=date(2026, 8, 20), snapshot_date=date(2026, 9, 13),
+            load_source="refresh_20260913", refresh_run_id="run1", min_row_ratio=0.5,
+        )
+    assert archive_writer.client.events == []
+
+
+def test_archive_and_replace_stamps_rows_and_orders_archive_before_delete_before_insert(archive_writer):
+    rows = [{"video_id": "v1", "estimated_minutes_watched": 1.0}]
+    n = archive_writer.archive_and_replace(
+        table_name="daily_video_analytics", archive_table="daily_video_analytics_refresh_archive",
+        new_rows=rows, activity_date=date(2026, 8, 20), snapshot_date=date(2026, 9, 13),
+        load_source="refresh_20260913", refresh_run_id="run1", min_row_ratio=0.5,
+    )
+    assert n == 1
+    assert rows[0]["activity_date"] == "2026-08-20"
+    assert rows[0]["snapshot_date"] == "2026-09-13"
+    assert rows[0]["load_source"] == "refresh_20260913"
+
+    kinds = [e[0] for e in archive_writer.client.events]
+    assert kinds == [
+        "get_table", "create_table", "load", "load_result", "query", "query_result", "delete_table",
+    ], "get the live schema, stage the work table, run the one transaction, then drop the work table"
+
+    script = [e for e in archive_writer.client.events if e[0] == "query"][0][1]
+    archive_pos = script.index("INSERT INTO `proj.ds.daily_video_analytics_refresh_archive`")
+    delete_pos = script.index("DELETE FROM `proj.ds.daily_video_analytics`")
+    insert_pos = script.index("INSERT INTO `proj.ds.daily_video_analytics`")
+    assert archive_pos < delete_pos < insert_pos, (
+        "archiving the OLD rows must happen before they are deleted, and deleting must "
+        "happen before the NEW rows are inserted, or the archive would capture the "
+        "wrong generation or the table would be briefly empty for readers"
+    )
+
+
+def test_archive_and_replace_threads_refresh_run_id_and_min_row_ratio(archive_writer):
+    archive_writer.archive_and_replace(
+        table_name="daily_video_analytics", archive_table="daily_video_analytics_refresh_archive",
+        new_rows=[{"video_id": "v1"}], activity_date=date(2026, 8, 20), snapshot_date=date(2026, 9, 13),
+        load_source="refresh_20260913", refresh_run_id="run-xyz", min_row_ratio=0.5,
+    )
+    _, _, params = [e for e in archive_writer.client.events if e[0] == "query"][0]
+    assert params["refresh_run_id"] == "run-xyz"
+    assert params["min_row_ratio"] == "0.5"
+    assert params["activity_date"] == "2026-08-20"
+
+
+def test_archive_and_replace_raises_replace_refused_and_still_drops_work_table(archive_writer):
+    archive_writer.client._query_side_effects = [
+        RuntimeError("refused: new row count is below min_row_ratio of the existing count")
+    ]
+    with pytest.raises(ReplaceRefused):
+        archive_writer.archive_and_replace(
+            table_name="daily_video_analytics", archive_table="daily_video_analytics_refresh_archive",
+            new_rows=[{"video_id": "v1"}], activity_date=date(2026, 8, 20), snapshot_date=date(2026, 9, 13),
+            load_source="refresh_20260913", refresh_run_id="run1", min_row_ratio=0.5,
+        )
+    assert archive_writer.client.events[-1][0] == "delete_table", (
+        "the work table must be dropped even when the transaction is refused"
+    )
+
+
+def test_archive_and_replace_retries_transient_errors_then_succeeds(archive_writer, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    archive_writer.client._query_side_effects = [
+        RuntimeError("Transaction is aborted due to concurrent update"),
+        RuntimeError("rateLimitExceeded"),
+    ]
+    n = archive_writer.archive_and_replace(
+        table_name="daily_video_analytics", archive_table="daily_video_analytics_refresh_archive",
+        new_rows=[{"video_id": "v1"}], activity_date=date(2026, 8, 20), snapshot_date=date(2026, 9, 13),
+        load_source="refresh_20260913", refresh_run_id="run1", min_row_ratio=0.5,
+    )
+    assert n == 1
+    query_calls = [e for e in archive_writer.client.events if e[0] == "query"]
+    assert len(query_calls) == 3, "two transient failures, then a third attempt that succeeds"
+
+
+def test_archive_and_replace_gives_up_after_max_transient_retries(archive_writer, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    archive_writer.client._query_side_effects = [RuntimeError("backendError")] * 10
+    with pytest.raises(RuntimeError, match="backendError"):
+        archive_writer.archive_and_replace(
+            table_name="daily_video_analytics", archive_table="daily_video_analytics_refresh_archive",
+            new_rows=[{"video_id": "v1"}], activity_date=date(2026, 8, 20), snapshot_date=date(2026, 9, 13),
+            load_source="refresh_20260913", refresh_run_id="run1", min_row_ratio=0.5,
+        )
 
 
 def test_find_missing_dates_parameterises_range_and_limit(writer):
