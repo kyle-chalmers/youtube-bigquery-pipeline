@@ -14,10 +14,11 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 
 ![Architecture](docs/diagrams/pipeline-after-hardening-2026-09.png)
 
-Two Cloud Functions (2nd gen, Python 3.11) built from one source directory, each with its own Cloud Scheduler job:
+Three Cloud Functions (2nd gen, Python 3.11) built from one source directory, each with its own Cloud Scheduler job:
 
 - **`youtube-bigquery-pipeline`**, nightly at 00:10 Phoenix (ten minutes after the Data API quota resets). Fetches the video catalogue and public counters from the Data API, and per-video metrics and traffic sources for the activity day six days back from the Analytics API. Writes the four original tables with a delete-then-load keyed on the activity date that refuses to delete when the API returned nothing; re-queries recent activity days that have no rows.
 - **`youtube-reporting-ingest`**, 08:00 and 14:00 Phoenix. Lists every report YouTube still retains for the channel's 19 Reporting API jobs, compares with a ledger, archives each new file to Cloud Storage, parses by header name, and replaces that day's partition in one BigQuery transaction guarded by assertions (rows present, one expected date, the configured channel, unique grain, no newer generation already loaded). A header-only report never deletes a populated day. `REPORTING_ENABLED` is a kill switch.
+- **`youtube-analytics-refresh`**, weekly on Sundays at 03:00 Phoenix, scheduled far from the 00:10 daily run on purpose. Re-fetches the trailing ~30 activity days and overwrites `daily_video_analytics`/`daily_traffic_sources` so revisions YouTube makes after the fact (up to ~30 days) are picked up, archiving the pre-refresh rows first for a before/after diff. Traffic sources use one range query for the whole window instead of one call per video per day (confirmed live: ~30 minutes down to under a second for 200+ videos). Its schedule separation from the daily function's gap repair is a deliberate, documented tradeoff, not an oversight — see `cloud_function/analytics_refresh.py`'s module docstring.
 
 Secrets (API key, OAuth client, refresh token) live in Secret Manager. One refresh token with the `yt-analytics.readonly` scope serves both the Analytics and the Reporting API, so the channel account and the cloud project can be different Google accounts. Everything runs inside the GCP free tier.
 
@@ -56,8 +57,9 @@ Each script is idempotent. Run them in this order; the reasons are in the adopti
 | 6 | `bash setup/8_create_staging.sh` | Creates `youtube_analytics_staging` seeded from production; deploy both functions there first with `FUNCTION_NAME=...-staging BQ_DATASET=youtube_analytics_staging` |
 | 7 | `bash setup/4_deploy_function.sh` | The daily function. Sets every tuning variable explicitly (`ANALYTICS_LOOKBACK_DAYS=6`, `GAP_LOOKBACK_DAYS=21`, `MAX_GAP_REPAIRS_PER_RUN=5`) |
 | 8 | `REPORTING_ENABLED=false bash setup/9_deploy_reporting_function.sh`, backfill, then `REPORTING_ENABLED=true ...` | Deploy with the switch off, run `python3 setup/backfill_reporting.py --dataset youtube_analytics --from-gcs` then the same without `--from-gcs`, verify, then switch on. The flag has no default for production, so a redeploy cannot silently change it |
-| 9 | `bash setup/5_create_scheduler.sh` for each function; `ALERT_EMAIL=... bash setup/6_setup_monitoring.sh` | Ingest schedule is `FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE="0 8,14 * * *"`. The scheduler script grants its service account permission to invoke the function. Four email alerts: pipeline crash or empty analytics, Reporting load failure or conflict or switch left off, stale report type, scheduler failure |
+| 9 | `bash setup/5_create_scheduler.sh` for each function; `ALERT_EMAIL=... bash setup/6_setup_monitoring.sh` | Ingest schedule is `FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE="0 8,14 * * *"`. The scheduler script grants its service account permission to invoke the function. Five email alerts: pipeline crash or empty analytics, Reporting load failure or conflict or switch left off, stale report type, Analytics refresh failure or incomplete day, scheduler failure |
 | 10 | `BQ_DATASET=youtube_analytics bash setup/10_create_views.sh` | The twelve views; views hold no data |
+| 11 | `REFRESH_TIMEOUT=... ANALYTICS_LOOKBACK_DAYS=... bash setup/12_deploy_refresh_function.sh`, then `FUNCTION_NAME=youtube-analytics-refresh JOB_NAME=youtube-analytics-refresh-weekly SCHEDULE="0 3 * * 0" ATTEMPT_DEADLINE=... MAX_RETRY_ATTEMPTS=0 bash setup/5_create_scheduler.sh` | Time a real run with `setup/refresh_analytics.py` against staging first and use that (with headroom) for `REFRESH_TIMEOUT`/`ATTEMPT_DEADLINE` — don't guess. `ANALYTICS_LOOKBACK_DAYS` must match the daily function's deployed value |
 
 IAM for the function's service account: `cloudbuild.builds.builder`, `secretmanager.secretAccessor`, `bigquery.dataEditor`, `bigquery.jobUser`, and `storage.objectCreator` plus `objectViewer` on the archive bucket only (the deploy script grants those two).
 
@@ -162,8 +164,8 @@ Inside the GCP free tier at a personal-channel scale (204 videos, 55 MB of BigQu
 
 | Service | Free tier | This pipeline |
 |---|---|---|
-| Cloud Functions | 2M invocations/month | about 90 (1 + 2 per day) |
-| Cloud Scheduler | 3 jobs per billing account | 2 |
+| Cloud Functions | 2M invocations/month | about 94 (1 + 2 per day, plus 1/week) |
+| Cloud Scheduler | 3 jobs per billing account | 3 (at the free-tier limit — a 4th recurring job needs a paid billing account) |
 | BigQuery | 10 GB storage, 1 TB queries/month | tens of MB, kilobytes per query |
 | Cloud Storage | 5 GB | a few MB of gzipped CSV |
 | YouTube Data API | 10,000 units/day, shared by every tool in the project | about 10 per run; one bulk upload elsewhere can exhaust it |

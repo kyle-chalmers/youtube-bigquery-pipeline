@@ -1,7 +1,7 @@
 """YouTube Analytics API v2 client for fetching watch time, engagement, and traffic data."""
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from googleapiclient.discovery import build
@@ -53,6 +53,16 @@ logger = logging.getLogger(__name__)
 RESULT_CAP = 200
 SHARD_SIZE = 100
 MAX_FILTER_IDS = 500
+
+# get_traffic_sources_range's cap. Confirmed live against this channel (2026-09-07):
+# maxResults=25000 is rejected outright (HTTP 400 "Unsupported content"), maxResults=10000
+# is accepted and, for 204 videos x 30 days, returned every row in one call (3,560 rows,
+# well under this cap) in under a second. This is a validated floor, not a measured
+# ceiling — the true maximum accepted value was not probed. If a real response ever comes
+# back at exactly this many rows, treat it as truncated and split the date range (see
+# _fetch_traffic_range), the same defensive shape _fetch_video_rows already uses for its
+# own cap.
+RANGE_TRAFFIC_MAX_RESULTS = 10000
 
 
 class YouTubeAnalyticsAPI:
@@ -189,6 +199,118 @@ class YouTubeAnalyticsAPI:
             f"Got traffic sources: {len(all_rows)} rows for {len(video_ids)} videos"
         )
         return all_rows, errors
+
+    # Used only by the trailing-N-day refresh job (cloud_function/analytics_refresh.py),
+    # never by the daily cron: the daily function only ever needs one activity day, where
+    # this shape has no material advantage over get_traffic_sources above (unchanged, and
+    # still what the daily path uses).
+    #
+    # get_traffic_sources above makes one API call per video per day, which is fine for a
+    # single day but does not scale to a 30-day refresh window: 204 videos x 30 days would
+    # be ~6,100 sequential calls, measured live against this channel's staging data at
+    # roughly 30 minutes wall-clock — dangerously close to Cloud Scheduler's own 30-minute
+    # attempt-deadline ceiling. Promoting `video` and `day` to combined dimensions (rather
+    # than filtering to one video and one day) moves the request onto a report shape that
+    # accepts a real date range and a multi-video filter in one call. Confirmed live
+    # 2026-09-07: 204 videos x 30 days, one call, under a second, 3,560 rows returned
+    # (cross-checked against 3,534 existing rows in daily_traffic_sources for the same
+    # window — a small, expected difference, not a mismatch worth chasing here). YouTube's
+    # documented ceiling for this report shape is `videos x days < 50,000`; MAX_FILTER_IDS
+    # (500) still caps how many video ids one call's filter can hold, so a channel with
+    # more than 500 videos needs sharding by video id, handled below.
+    def get_traffic_sources_range(
+        self, video_ids: list[str], start_date: date, end_date: date
+    ) -> tuple[dict[date, list[dict[str, Any]]], list[str]]:
+        """Fetch traffic sources for every day in [start_date, end_date] in as few
+        calls as possible.
+
+        Args:
+            video_ids: The videos to cover. Sharded by MAX_FILTER_IDS if there are more
+                than the API's per-call filter limit.
+            start_date: First activity date, inclusive.
+            end_date: Last activity date, inclusive.
+
+        Returns:
+            (rows_by_date, errors). rows_by_date has one key per date in the window,
+            EVEN ones with no rows (an empty list, not a missing key), so a caller can
+            tell "no data that day" apart from "day not covered by this call" without a
+            separate presence check. errors is shard-level, not per-video: if a shard's
+            call fails, every date in the window is affected for that shard's videos,
+            not just some days — a caller must not treat a day whose rows_by_date entry
+            looks complete-or-empty as trustworthy when errors is non-empty, since a
+            failed shard can leave some videos silently missing from every day.
+        """
+        errors: list[str] = []
+        rows_by_date: dict[date, list[dict[str, Any]]] = {}
+        current = start_date
+        while current <= end_date:
+            rows_by_date[current] = []
+            current += timedelta(days=1)
+
+        for i in range(0, len(video_ids), MAX_FILTER_IDS):
+            shard = video_ids[i : i + MAX_FILTER_IDS]
+            try:
+                shard_rows = self._fetch_traffic_range(shard, start_date, end_date)
+            except Exception as e:
+                logger.error(
+                    f"Traffic range query failed for a shard of {len(shard)} videos "
+                    f"({start_date} to {end_date}): {redact(str(e))}"
+                )
+                errors.append(f"shard of {len(shard)} videos: {str(e)}")
+                continue
+            for video_id, day_str, source_type, views, minutes in shard_rows:
+                day = date.fromisoformat(day_str)
+                rows_by_date.setdefault(day, []).append(
+                    {
+                        "video_id": video_id,
+                        "traffic_source_type": source_type,
+                        "views": views,
+                        "estimated_minutes_watched": minutes,
+                    }
+                )
+
+        total_rows = sum(len(rows) for rows in rows_by_date.values())
+        logger.info(
+            f"Got traffic sources (range): {total_rows} rows for {len(video_ids)} "
+            f"videos across {(end_date - start_date).days + 1} days"
+        )
+        return rows_by_date, errors
+
+    def _fetch_traffic_range(
+        self, video_ids: list[str], start_date: date, end_date: date
+    ) -> list[list[Any]]:
+        """One range call; splits the date range in half and retries if the response
+        looks truncated at RANGE_TRAFFIC_MAX_RESULTS."""
+        response = self._api_call_with_retry(
+            lambda: self.analytics.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=str(start_date),
+                endDate=str(end_date),
+                dimensions="video,day,insightTrafficSourceType",
+                metrics="views,estimatedMinutesWatched",
+                filters="video==" + ",".join(video_ids),
+                maxResults=RANGE_TRAFFIC_MAX_RESULTS,
+            )
+            .execute()
+        )
+        rows = response.get("rows", [])
+        if len(rows) >= RANGE_TRAFFIC_MAX_RESULTS:
+            if start_date >= end_date:
+                raise RuntimeError(
+                    f"Traffic range query capped at {RANGE_TRAFFIC_MAX_RESULTS} rows "
+                    f"on a single day ({start_date}) for {len(video_ids)} videos; "
+                    f"cannot split the date range further"
+                )
+            mid = start_date + (end_date - start_date) // 2
+            logger.error(
+                f"Traffic range query hit the {RANGE_TRAFFIC_MAX_RESULTS}-row cap for "
+                f"{start_date} to {end_date}; splitting at {mid} and retrying both halves"
+            )
+            return self._fetch_traffic_range(
+                video_ids, start_date, mid
+            ) + self._fetch_traffic_range(video_ids, mid + timedelta(days=1), end_date)
+        return rows
 
     # 429 is rate limiting; 500/502/503/504 are transient server faults. Both are
     # worth retrying. Retrying only 429 silently dropped a video's traffic on the

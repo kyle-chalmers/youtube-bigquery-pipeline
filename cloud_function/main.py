@@ -235,6 +235,13 @@ def _repair_gaps(
     writes nothing and no later run ever looks back. Every confirmed hole in this
     warehouse turned out to be recoverable by simply asking again later.
 
+    Shares BigQueryWriter._delete_and_insert's DELETE+INSERT semantics with the
+    trailing-30-day Analytics refresh job (cloud_function/analytics_refresh.py), and
+    their date windows overlap by design. The two are kept from racing on the same
+    partition only by Cloud Scheduler timing, not a lock — see the soft-guard invariant
+    documented at the top of analytics_refresh.py before changing this function's
+    schedule or window (GAP_LOOKBACK_DAYS, ANALYTICS_LOOKBACK_DAYS).
+
     Returns:
         The activity dates repaired, as ISO strings.
     """

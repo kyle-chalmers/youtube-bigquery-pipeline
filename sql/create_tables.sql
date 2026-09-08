@@ -84,3 +84,53 @@ CLUSTER BY video_id
 OPTIONS (
     description = 'Daily traffic source breakdown. Partitioned by activity_date (when it happened), not snapshot_date (when collected).'
 );
+
+-- Trailing-30-day Analytics refresh archive tables (Phase 4 hardening).
+-- Populated by BigQueryWriter.archive_and_replace immediately before the refresh job
+-- overwrites a day's rows, so the pre-refresh values are recoverable for a before/after
+-- diff (BigQuery time travel alone does not reach back the up-to-30-day window YouTube
+-- can revise). Append-only: one row per (activity_date, video_id[, traffic_source_type])
+-- per refresh run that actually touched that day. partition_expiration_days is set at
+-- creation rather than added later, so nothing has to be remembered to prune it.
+CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.daily_video_analytics_refresh_archive` (
+    activity_date DATE NOT NULL,
+    snapshot_date DATE NOT NULL,
+    video_id STRING NOT NULL,
+    load_source STRING NOT NULL,
+    estimated_minutes_watched FLOAT64,
+    average_view_duration_seconds FLOAT64,
+    average_view_percentage FLOAT64,
+    impressions INT64,
+    impression_ctr FLOAT64,
+    subscribers_gained INT64,
+    subscribers_lost INT64,
+    shares INT64,
+    annotation_click_through_rate FLOAT64,
+    card_click_rate FLOAT64,
+    archived_at TIMESTAMP NOT NULL,
+    refresh_run_id STRING NOT NULL
+)
+PARTITION BY activity_date
+CLUSTER BY video_id
+OPTIONS (
+    description = 'Pre-refresh copy of daily_video_analytics rows, captured before the trailing-30-day refresh job overwrites a day. See CLAUDE.md Key Code Patterns for the refresh job.',
+    partition_expiration_days = 400
+);
+
+CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.daily_traffic_sources_refresh_archive` (
+    activity_date DATE NOT NULL,
+    snapshot_date DATE NOT NULL,
+    video_id STRING NOT NULL,
+    traffic_source_type STRING NOT NULL,
+    load_source STRING NOT NULL,
+    views INT64,
+    estimated_minutes_watched FLOAT64,
+    archived_at TIMESTAMP NOT NULL,
+    refresh_run_id STRING NOT NULL
+)
+PARTITION BY activity_date
+CLUSTER BY video_id
+OPTIONS (
+    description = 'Pre-refresh copy of daily_traffic_sources rows, captured before the trailing-30-day refresh job overwrites a day. See CLAUDE.md Key Code Patterns for the refresh job.',
+    partition_expiration_days = 400
+);
