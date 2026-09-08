@@ -39,6 +39,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from bigquery_writer import BigQueryWriter, ReplaceRefused
+from log_safety import redact
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +137,14 @@ def refresh_trailing_days(
         video_ids, start, end
     )
     if traffic_shard_errors:
+        # get_traffic_sources_range redacts when it logs a shard failure at the source,
+        # but the strings it returns to us are raw exception text — redact again here
+        # before this joins and logs them, the same discipline every other exception-to-
+        # log path in this codebase follows (see log_safety.py's docstring for why).
         log.warning(
             f"Traffic range fetch had {len(traffic_shard_errors)} shard-level error(s); "
             f"every day in the window will be skipped for daily_traffic_sources this "
-            f"run: {'; '.join(traffic_shard_errors)}"
+            f"run: {redact('; '.join(traffic_shard_errors))}"
         )
 
     outcomes: dict[str, dict[str, str]] = {}

@@ -225,6 +225,26 @@ def test_refresh_trailing_days_propagates_traffic_shard_error_to_every_day():
     )
 
 
+def test_refresh_trailing_days_redacts_traffic_shard_errors_before_logging(caplog):
+    # get_traffic_sources_range redacts at its own logging call site, but the strings it
+    # RETURNS to the caller are raw exception text (see youtube_analytics_api.py's
+    # errors.append). refresh_trailing_days must redact again before it joins and logs
+    # them, or a secret embedded in the raw exception (API key in a URL, bearer token)
+    # reaches Cloud Logging unredacted — this codebase has shipped that exact bug before.
+    run_date = date(2026, 9, 13)
+    writer = FakeWriter()
+    leaky = "quotaExceeded for https://x?access_token=SECRET123 Bearer SECRET123"
+    analytics = FakeAnalytics(traffic_shard_errors=[leaky])
+    with caplog.at_level(logging.WARNING):
+        refresh_trailing_days(
+            video_ids=["v1"], analytics_api=analytics, bq_writer=writer,
+            run_date=run_date, refresh_run_id="r1", lookback_days=6, trailing_days=1,
+            log=make_log(),
+        )
+    logged = "\n".join(caplog.messages)
+    assert "SECRET123" not in logged, "an unredacted secret reached the log"
+
+
 def test_refresh_trailing_days_default_load_source_matches_run_date():
     run_date = date(2026, 9, 13)
     writer = FakeWriter()
