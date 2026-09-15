@@ -24,6 +24,7 @@ import _bootstrap  # noqa: F401  (adds cloud_function/ to sys.path)
 from bigquery_writer import BigQueryWriter
 from oauth_credentials import load_oauth_credentials
 from retry import with_retry
+from run_lease import manual_writer_lease
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -176,8 +177,9 @@ def main():
     logger.info(f"Rows will be tagged load_source={load_source}, snapshot_date={run_date}")
 
     analytics = build_analytics_client()
-    bq_client = bigquery.Client(project=PROJECT_ID)
-    writer = BigQueryWriter(project_id=PROJECT_ID, dataset_id=DATASET_ID)
+    credentials = _bootstrap.google_cloud_credentials()
+    bq_client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
+    writer = BigQueryWriter(project_id=PROJECT_ID, dataset_id=DATASET_ID, credentials=credentials)
 
     # Get video IDs from the most recent video_metadata snapshot
     query = f"SELECT DISTINCT video_id FROM `{PROJECT_ID}.{DATASET_ID}.video_metadata` WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM `{PROJECT_ID}.{DATASET_ID}.video_metadata`)"
@@ -187,30 +189,36 @@ def main():
     total_analytics = 0
     total_traffic = 0
 
-    current_date = start_date
-    day_num = 0
-    while current_date <= end_date:
-        day_num += 1
-        logger.info(f"[{day_num}/{total_days}] Processing {current_date}...")
+    with manual_writer_lease(
+        project_id=PROJECT_ID,
+        dataset=DATASET_ID,
+        domain="analytics-writer",
+        entrypoint="backfill_analytics",
+    ):
+        current_date = start_date
+        day_num = 0
+        while current_date <= end_date:
+            day_num += 1
+            logger.info(f"[{day_num}/{total_days}] Processing {current_date}...")
 
-        # Fetch and write analytics
-        analytics_rows = fetch_video_analytics(analytics, current_date, video_ids)
-        a_count = write_rows(writer, "daily_video_analytics", analytics_rows,
-                             current_date, run_date, load_source)
-        total_analytics += a_count
+            # Fetch and write analytics
+            analytics_rows = fetch_video_analytics(analytics, current_date, video_ids)
+            a_count = write_rows(writer, "daily_video_analytics", analytics_rows,
+                                 current_date, run_date, load_source)
+            total_analytics += a_count
 
-        # Fetch and write traffic sources
-        traffic_rows = fetch_traffic_sources(analytics, video_ids, current_date)
-        t_count = write_rows(writer, "daily_traffic_sources", traffic_rows,
-                             current_date, run_date, load_source)
-        total_traffic += t_count
+            # Fetch and write traffic sources
+            traffic_rows = fetch_traffic_sources(analytics, video_ids, current_date)
+            t_count = write_rows(writer, "daily_traffic_sources", traffic_rows,
+                                 current_date, run_date, load_source)
+            total_traffic += t_count
 
-        logger.info(f"  → {a_count} analytics rows, {t_count} traffic rows")
+            logger.info(f"  → {a_count} analytics rows, {t_count} traffic rows")
 
-        current_date += timedelta(days=1)
+            current_date += timedelta(days=1)
 
-        # Small delay to avoid rate limits
-        time.sleep(0.5)
+            # Small delay to avoid rate limits
+            time.sleep(0.5)
 
     logger.info(f"Backfill complete: {total_analytics} analytics rows, {total_traffic} traffic rows across {total_days} days")
 

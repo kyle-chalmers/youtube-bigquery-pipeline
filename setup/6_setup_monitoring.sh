@@ -15,7 +15,7 @@ set -euo pipefail
 #                               than REPORTING_STALE_DAYS (a job stopped generating, or auth broke quietly)
 #   youtube-refresh-failure     the trailing-30-day Analytics refresh crashed entirely, or refused/
 #                               skipped one or more days (partial fetch errors, or a suspiciously low
-#                               row count) — see analytics_refresh.py's soft-guard invariant comment
+#                               row count)
 #   youtube-scheduler-failure   Cloud Scheduler reported a non-2xx or a timeout for any job here
 #
 # Requires: ALERT_EMAIL. Optional: FUNCTION_NAME (default youtube-bigquery-pipeline),
@@ -29,6 +29,7 @@ FUNCTION_NAME="${FUNCTION_NAME:-youtube-bigquery-pipeline}"
 REPORTING_FUNCTION_NAME="${REPORTING_FUNCTION_NAME:-youtube-reporting-ingest}"
 REFRESH_FUNCTION_NAME="${REFRESH_FUNCTION_NAME:-youtube-analytics-refresh}"
 POLICY_SUFFIX="${POLICY_SUFFIX:-}"
+SCHEDULER_JOB_IDS="${SCHEDULER_JOB_IDS:-youtube-daily-snapshot,youtube-reporting-daily,youtube-analytics-refresh-weekly}"
 CHANNEL_DISPLAY_NAME="youtube-pipeline-alerts"
 
 if [[ -z "${ALERT_EMAIL:-}" ]]; then
@@ -37,11 +38,36 @@ if [[ -z "${ALERT_EMAIL:-}" ]]; then
     exit 1
 fi
 
+validate_policy_scope() {
+    local expected_suffix="$1" name job
+    shift
+    if [[ -z "$expected_suffix" ]]; then
+        for name in "$@"; do
+            if [[ "$name" == *-staging ]]; then
+                echo "Refusing: a production policy cannot reference a staging resource." >&2
+                return 1
+            fi
+        done
+        return 0
+    fi
+    for name in "$@"; do
+        if [[ "$name" != *"$expected_suffix" ]]; then
+            echo "Refusing: a staging policy must reference only staging resources." >&2
+            return 1
+        fi
+    done
+}
+
+IFS=',' read -r -a POLICY_JOBS <<< "$SCHEDULER_JOB_IDS"
+validate_policy_scope "$POLICY_SUFFIX" \
+    "$FUNCTION_NAME" "$REPORTING_FUNCTION_NAME" "$REFRESH_FUNCTION_NAME" "${POLICY_JOBS[@]}"
+
 echo "Project:            $PROJECT_ID"
-echo "Alert email:        $ALERT_EMAIL"
+echo "Alert email:        configured"
 echo "Pipeline function:  $FUNCTION_NAME"
 echo "Reporting function: $REPORTING_FUNCTION_NAME"
 echo "Policy suffix:      '${POLICY_SUFFIX}'"
+echo "Scheduler jobs:     $SCHEDULER_JOB_IDS"
 echo ""
 
 # 1. Find or create the email notification channel.
@@ -72,6 +98,21 @@ log_filter() {  # service_name string...
     echo "resource.type=\\\"cloud_run_revision\\\" AND resource.labels.service_name=\\\"$svc\\\" AND ($joined)"
 }
 
+scheduler_filter() {
+    local parts=() job joined
+    IFS=',' read -r -a jobs <<< "$SCHEDULER_JOB_IDS"
+    for job in "${jobs[@]}"; do
+        [[ -n "$job" ]] && parts+=("resource.labels.job_id=\\\"$job\\\"")
+    done
+    if [[ ${#parts[@]} -eq 0 ]]; then
+        echo "SCHEDULER_JOB_IDS must name at least one exact job id" >&2
+        return 1
+    fi
+    joined=$(IFS='|'; echo "${parts[*]}")
+    joined="${joined//|/ OR }"
+    echo "resource.type=\\\"cloud_scheduler_job\\\" AND severity>=ERROR AND ($joined)"
+}
+
 # Create or update one log-based alert policy. Auto-close after 25h so a still-broken
 # pipeline re-alerts the next day; at most one notification per hour.
 upsert_policy() {  # name condition_display filter documentation
@@ -80,6 +121,7 @@ upsert_policy() {  # name condition_display filter documentation
     cat > "$json" <<EOF
 {
   "displayName": "$name",
+  "severity": "ERROR",
   "documentation": {"content": "$doc", "mimeType": "text/markdown"},
   "conditions": [{"displayName": "$cond", "conditionMatchedLog": {"filter": "$filter"}}],
   "alertStrategy": {"notificationRateLimit": {"period": "3600s"}, "autoClose": "90000s"},
@@ -103,12 +145,12 @@ EOF
 
 upsert_policy "youtube-analytics-failure${POLICY_SUFFIX}" \
     "Analytics failure log entry" \
-    "$(log_filter "$FUNCTION_NAME" "Analytics API failed entirely" "Wrote daily_video_analytics — 0 rows" "Pipeline failed")" \
+    "$(log_filter "$FUNCTION_NAME" "Analytics API failed entirely" "Wrote daily_video_analytics — 0 rows" "Pipeline failed" "Writer lease expired" "Writer lease release failed")" \
     "Either the whole pipeline crashed (log line starts with Pipeline failed; on 2026-08-14 the cause was the Data API daily quota exhausted by another consumer in this project, since the run fires ten minutes before the Pacific-midnight quota reset) or the analytics half wrote 0 rows. Token expiry is NOT the usual cause; the current token has run for months. Check likely causes in order: (1) the Analytics API had no data yet for the queried activity date, which is what happens when the lookback sits near the edge of availability; (2) one metric in the six-metric query hit a backend issue and zeroed the whole response. Fastest triage: check whether daily_traffic_sources got rows for the same activity date. If it did, credentials are fine. The self-healing gap re-query should recover the day within GAP_LOOKBACK_DAYS."
 
 upsert_policy "youtube-reporting-failure${POLICY_SUFFIX}" \
     "Reporting ingest failure log entry" \
-    "$(log_filter "$REPORTING_FUNCTION_NAME" "Reporting API failed entirely" "Reporting load error" "Reporting header-only report supersedes populated day" "Reporting API skipped")" \
+    "$(log_filter "$REPORTING_FUNCTION_NAME" "Reporting API failed entirely" "Reporting load error" "Reporting header-only report supersedes populated day" "Reporting API skipped" "Reporting work budget exhausted" "Reporting transaction contention deferred remaining work" "Writer lease expired" "Writer lease release failed")" \
     "The YouTube Reporting API ingest ($REPORTING_FUNCTION_NAME) hit a failure. Four cases: (0) 'Reporting API skipped' means the function is deployed with REPORTING_ENABLED=false; redeploy with it true, reports expire 60 days after generation. (1) 'failed entirely' means the run crashed before or during listing, usually auth or BigQuery; (2) 'Reporting load error' lists one report that did not load (download, schema drift, or a refused transaction), the ledger row has status failed with the error text, and the next run retries it automatically; (3) 'header-only report supersedes populated day' means YouTube regenerated a day as empty while the table holds rows for it. Nothing was deleted. Inspect the day and, only if the emptying is genuine, apply it with setup/backfill_reporting.py --allow-empty-replace. Query the ledger: SELECT * FROM reporting_ingest_ledger WHERE status IN ('failed','header_only_conflict') ORDER BY ingested_at DESC."
 
 upsert_policy "youtube-reporting-stale${POLICY_SUFFIX}" \
@@ -118,14 +160,14 @@ upsert_policy "youtube-reporting-stale${POLICY_SUFFIX}" \
 
 upsert_policy "youtube-refresh-failure${POLICY_SUFFIX}" \
     "Analytics refresh failure log entry" \
-    "$(log_filter "$REFRESH_FUNCTION_NAME" "Analytics refresh failed entirely" "refresh_incomplete")" \
-    "The trailing-30-day Analytics refresh ($REFRESH_FUNCTION_NAME) hit a problem. Two cases: (1) 'failed entirely' means the run crashed before completing, usually auth or BigQuery; (2) 'refresh_incomplete' is logged once per activity_date/table the run skipped rather than wrote, for one of three reasons stated in the same log line: per-video fetch errors (a partial day is never written over a complete one), a fetch that came back empty after previously having rows (possible single-metric-zeroing on the Analytics API, not necessarily a real revision to zero), or a row count the transaction judged suspiciously low relative to what was already there. None of these lose data — the existing partition is always left untouched on any of these paths. A skipped day is retried automatically on the next scheduled run, since the window is recomputed fresh each time. This function assumes it never runs concurrently with the daily pipeline's gap repair (see the soft-guard invariant in cloud_function/analytics_refresh.py's module docstring) — if that separation is ever violated, watch for duplicate rows in daily_video_analytics/daily_traffic_sources instead, which this alert does not catch."
+    "$(log_filter "$REFRESH_FUNCTION_NAME" "Analytics refresh failed entirely" "refresh_incomplete" "Writer lease expired" "Writer lease release failed")" \
+    "The trailing-30-day Analytics refresh ($REFRESH_FUNCTION_NAME) hit a problem. Two cases: (1) 'failed entirely' means the run crashed before completing, usually auth or BigQuery; (2) 'refresh_incomplete' is logged once per activity_date/table the run skipped rather than wrote, for one of three reasons stated in the same log line: per-video fetch errors (a partial day is never written over a complete one), a fetch that came back empty after previously having rows (possible single-metric-zeroing on the Analytics API, not necessarily a real revision to zero), or a row count the transaction judged suspiciously low relative to what was already there. None of these lose data. The existing partition is left untouched on every skipped path. A skipped day is retried automatically on the next scheduled run because the window is recomputed each time. The daily and refresh writers share one analytics lease, and every replacement transaction also updates the analytics mutex."
 
 # A run that never happened, or was killed by a timeout, emits no log string at all. Cloud
 # Scheduler logs an ERROR when the target returns non-2xx or times out; match that too.
 upsert_policy "youtube-scheduler-failure${POLICY_SUFFIX}" \
     "Cloud Scheduler job failure" \
-    "resource.type=\\\"cloud_scheduler_job\\\" AND severity>=ERROR" \
+    "$(scheduler_filter)" \
     "A Cloud Scheduler job in this project reported an error: the target function returned a non-2xx status or did not answer within the attempt deadline. Check which job (youtube-daily-snapshot or youtube-reporting-daily) and read that function's latest logs. A timeout on the Reporting ingest usually means a large catch-up; it resumes from the ledger on the next run."
 
 echo ""

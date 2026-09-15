@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 TRANSIENT_RETRIES = 3
 TRANSIENT_BACKOFF_SECONDS = (5, 10, 20)
 TRANSIENT_MARKERS = ("concurrent", "transaction is aborted", "abort", "backenderror", "internalerror", "ratelimitexceeded")
+CONCURRENCY_MARKERS = ("concurrent", "transaction is aborted")
 
 
 class ReplaceRefused(RuntimeError):
@@ -65,6 +66,10 @@ class ReplaceRefused(RuntimeError):
 
 class AlreadyLoaded(ReplaceRefused):
     """This report, or an equal-or-newer generation of its day, is already loaded. Not an error."""
+
+
+class ConcurrentRunDetected(RuntimeError):
+    """BigQuery still reported transaction contention after the bounded retry window."""
 
 
 class PartitionReplacer(Protocol):
@@ -91,6 +96,11 @@ def build_replace_script(dataset_ref: str, spec: ReportSpec, work_table: str) ->
     return f"""
 BEGIN
   BEGIN TRANSACTION;
+
+  UPDATE `{dataset_ref}.pipeline_write_mutex_reporting`
+  SET touched_at = CURRENT_TIMESTAMP()
+  WHERE mutex_name = 'reporting';
+  ASSERT @@row_count = 1 AS 'refused: reporting pipeline write mutex must contain exactly one row';
 
   IF (SELECT COUNT(*) FROM {work}) = 0 THEN
     RAISE USING MESSAGE = 'refused: work table has zero rows';
@@ -155,10 +165,17 @@ def classify_error(message: str) -> str:
 class StagedTransactionalReplacer:
     """Load to a work table, then replace the partition and update the ledger in one transaction."""
 
-    def __init__(self, client: bigquery.Client, dataset_ref: str, channel_id: str) -> None:
+    def __init__(
+        self,
+        client: bigquery.Client,
+        dataset_ref: str,
+        channel_id: str,
+        job_labels: dict[str, str] | None = None,
+    ) -> None:
         self.client = client
         self.dataset_ref = dataset_ref
         self.channel_id = channel_id
+        self.job_labels = dict(job_labels or {})
 
     def _work_table_name(self, spec: ReportSpec, report_id: str) -> str:
         safe = "".join(ch for ch in report_id if ch.isalnum())[:12]
@@ -176,6 +193,7 @@ class StagedTransactionalReplacer:
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             schema=_schema_for(spec),
+            labels=self.job_labels,
         )
         self.client.load_table_from_file(io.BytesIO(payload), table_ref, job_config=job_config).result()
 
@@ -220,7 +238,10 @@ class StagedTransactionalReplacer:
         return len(rows)
 
     def _run_with_retries(self, script: str, params: list[Any]) -> None:
-        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=params,
+            labels=self.job_labels,
+        )
         for attempt in range(TRANSIENT_RETRIES + 1):
             try:
                 self.client.query(script, job_config=job_config).result()
@@ -234,7 +255,12 @@ class StagedTransactionalReplacer:
                     raise ReplaceRefused(msg) from e
                 if kind == "transient" and attempt < TRANSIENT_RETRIES:
                     wait = TRANSIENT_BACKOFF_SECONDS[attempt]
-                    logger.warning(f"transient BigQuery error, retrying in {wait}s (attempt {attempt + 1}/{TRANSIENT_RETRIES}): {msg[:200]}")
+                    logger.warning(
+                        f"transient BigQuery error, retrying in {wait}s "
+                        f"(attempt {attempt + 1}/{TRANSIENT_RETRIES}): {redact(msg)[:200]}"
+                    )
                     time.sleep(wait)
                     continue
+                if kind == "transient" and any(marker in msg.lower() for marker in CONCURRENCY_MARKERS):
+                    raise ConcurrentRunDetected(msg) from e
                 raise

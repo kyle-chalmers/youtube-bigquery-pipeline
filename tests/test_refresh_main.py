@@ -7,12 +7,14 @@ actually emits, or the alert is silently disabled.
 
 import logging
 import re
+from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 import refresh_main
+import run_lease
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = (ROOT / "setup" / "6_setup_monitoring.sh").read_text()
@@ -31,6 +33,8 @@ def test_monitoring_script_matches_the_refresh_log_strings():
     assert matched_strings("REFRESH_FUNCTION_NAME") == {
         refresh_main.FAILED_LOG,
         refresh_main.REFRESH_INCOMPLETE_LOG,
+        run_lease.LEASE_EXPIRED_LOG,
+        run_lease.LEASE_RELEASE_FAILED_LOG,
     }
 
 
@@ -55,8 +59,8 @@ def test_run_refresh_logs_complete_with_per_outcome_counts(monkeypatch, caplog):
             pass
 
     class FakeWriter:
-        def __init__(self, project_id, dataset_id):
-            pass
+        def __init__(self, project_id, dataset_id, job_labels=None):
+            assert job_labels == {"pipeline_run_id": "run1", "pipeline_writer": "analytics"}
 
     monkeypatch.setattr(refresh_main, "YouTubeAnalyticsAPI", FakeAnalyticsAPI)
     monkeypatch.setattr(refresh_main, "BigQueryWriter", FakeWriter)
@@ -90,13 +94,18 @@ def test_run_refresh_logs_complete_with_per_outcome_counts(monkeypatch, caplog):
 
 
 def test_refresh_main_failure_path_redacts_and_returns_500(monkeypatch, caplog):
+    called = []
+
     def boom(run_date, refresh_run_id, log):
+        called.append(refresh_run_id)
         raise RuntimeError("invalid_grant?access_token=SECRET")
 
+    monkeypatch.setattr(refresh_main, "build_run_lease", lambda **kwargs: nullcontext())
     monkeypatch.setattr(refresh_main, "run_refresh", boom)
     with caplog.at_level(logging.INFO):
         body, status = refresh_main.refresh_main(request=None)
     assert status == 500
+    assert called
     assert "SECRET" not in body["error"]
     assert any(
         r.getMessage().startswith(refresh_main.FAILED_LOG) and "SECRET" not in r.getMessage()
@@ -105,6 +114,7 @@ def test_refresh_main_failure_path_redacts_and_returns_500(monkeypatch, caplog):
 
 
 def test_refresh_main_success_path_returns_200_with_run_id(monkeypatch):
+    monkeypatch.setattr(refresh_main, "build_run_lease", lambda **kwargs: nullcontext())
     monkeypatch.setattr(
         refresh_main, "run_refresh",
         lambda run_date, refresh_run_id, log: {"outcomes": {}, "counts": {}},

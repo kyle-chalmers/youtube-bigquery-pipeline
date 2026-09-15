@@ -81,6 +81,8 @@ def test_empty_replace_script_validates_before_deleting():
     script = br.empty_replace_script("p.ds", "reporting_channel_reach_basic_a1")
     assert script.index("status = 'header_only_conflict'") < script.index("DELETE FROM `p.ds.reporting_channel_reach_basic_a1`")
     assert "BEGIN TRANSACTION" in script and "ROLLBACK TRANSACTION" in script and "rows_removed" in script
+    assert "UPDATE `p.ds.pipeline_write_mutex_reporting`" in script
+    assert "ASSERT @@row_count = 1" in script
 
 
 def test_only_report_restricts_to_one_report_id():

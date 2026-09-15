@@ -27,6 +27,7 @@ import _bootstrap  # noqa: F401  (adds cloud_function/ to sys.path)
 # isort: split   (everything below needs _bootstrap to have run first)
 from analytics_refresh import DEFAULT_MIN_ROW_RATIO, refresh_trailing_days
 from bigquery_writer import BigQueryWriter
+from run_lease import manual_writer_lease
 from youtube_analytics_api import YouTubeAnalyticsAPI
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -41,7 +42,7 @@ def main():
     parser.add_argument("--trailing-days", type=int, default=30)
     parser.add_argument(
         "--lookback-days", type=int,
-        default=int(os.environ.get("ANALYTICS_LOOKBACK_DAYS", "5")),
+        default=int(os.environ.get("ANALYTICS_LOOKBACK_DAYS", "6")),
         help="Must match whatever the daily function is deployed with, not the code default.",
     )
     parser.add_argument("--run-date", default=None, help="Override today (YYYY-MM-DD), for rehearsal")
@@ -63,7 +64,8 @@ def main():
         f"load_source={load_source}, refresh_run_id={refresh_run_id}"
     )
 
-    bq_client = bigquery.Client(project=PROJECT_ID)
+    credentials = _bootstrap.google_cloud_credentials()
+    bq_client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
     query = (
         f"SELECT DISTINCT video_id FROM `{PROJECT_ID}.{args.dataset}.video_metadata` "
         f"WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM "
@@ -73,20 +75,27 @@ def main():
     logger.info(f"Found {len(video_ids)} videos to refresh")
 
     analytics_api = YouTubeAnalyticsAPI(project_id=PROJECT_ID)
-    bq_writer = BigQueryWriter(project_id=PROJECT_ID, dataset_id=args.dataset)
+    bq_writer = BigQueryWriter(project_id=PROJECT_ID, dataset_id=args.dataset, credentials=credentials)
 
     started = time.monotonic()
-    outcomes = refresh_trailing_days(
-        video_ids=video_ids,
-        analytics_api=analytics_api,
-        bq_writer=bq_writer,
-        run_date=run_date,
-        refresh_run_id=refresh_run_id,
-        lookback_days=args.lookback_days,
-        trailing_days=args.trailing_days,
-        load_source=load_source,
-        min_row_ratio=args.min_row_ratio,
-    )
+    with manual_writer_lease(
+        project_id=PROJECT_ID,
+        dataset=args.dataset,
+        domain="analytics-writer",
+        entrypoint="refresh_analytics",
+        run_id=refresh_run_id,
+    ):
+        outcomes = refresh_trailing_days(
+            video_ids=video_ids,
+            analytics_api=analytics_api,
+            bq_writer=bq_writer,
+            run_date=run_date,
+            refresh_run_id=refresh_run_id,
+            lookback_days=args.lookback_days,
+            trailing_days=args.trailing_days,
+            load_source=load_source,
+            min_row_ratio=args.min_row_ratio,
+        )
     elapsed = time.monotonic() - started
 
     counts = {"written": 0, "skipped_empty": 0, "skipped_error": 0, "skipped_low_count": 0}

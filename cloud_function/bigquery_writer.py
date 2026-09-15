@@ -1,6 +1,6 @@
 """BigQuery writer for YouTube analytics pipeline.
 
-Handles idempotent writes to all 4 tables using DELETE + batch load pattern.
+Handles idempotent writes to all four tables using staged transactional replacement.
 """
 
 import io
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Used only by archive_and_replace (the trailing-30-day refresh job). Retry policy
 # mirrors partition_replacer.py's StagedTransactionalReplacer, which solves the same
-# "stage then transact" problem for the Reporting tables — same transient-error
+# "stage then transact" problem for the Reporting tables. It uses the same transient-error
 # vocabulary, not a shared import, since that module is coupled to the reporting ledger
 # and this one isn't.
 _REFRESH_TRANSIENT_MARKERS = (
@@ -37,15 +37,22 @@ class ReplaceRefused(RuntimeError):
 class BigQueryWriter:
     """Writes YouTube data to BigQuery tables with idempotent upserts."""
 
-    def __init__(self, project_id: str, dataset_id: str) -> None:
+    def __init__(
+        self,
+        project_id: str,
+        dataset_id: str,
+        credentials=None,
+        job_labels: dict[str, str] | None = None,
+    ) -> None:
         """Initialize BigQuery client.
 
         Args:
             project_id: GCP project ID.
             dataset_id: BigQuery dataset name.
         """
-        self.client = bigquery.Client(project=project_id)
+        self.client = bigquery.Client(project=project_id, credentials=credentials)
         self.dataset_ref = f"{project_id}.{dataset_id}"
+        self.job_labels = dict(job_labels or {})
 
     def write_video_metadata(
         self, videos: list[dict[str, Any]], snapshot_date: date
@@ -186,7 +193,8 @@ class BigQueryWriter:
             query_parameters=[
                 bigquery.ScalarQueryParameter("earliest", "DATE", str(earliest)),
                 bigquery.ScalarQueryParameter("latest", "DATE", str(latest)),
-            ]
+            ],
+            labels=self.job_labels,
         )
         return [row[0] for row in self.client.query(query, job_config=job_config).result()]
 
@@ -205,7 +213,8 @@ class BigQueryWriter:
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("activity_date", "DATE", str(activity_date))
-            ]
+            ],
+            labels=self.job_labels,
         )
         return next(iter(self.client.query(query, job_config=job_config).result()))[0]
 
@@ -223,13 +232,10 @@ class BigQueryWriter:
         """Atomically archive an activity_date partition, then replace it with new_rows.
 
         Used only by the trailing-30-day refresh job (cloud_function/analytics_refresh.py),
-        never by the daily cron or gap repair — those keep the plain _delete_and_insert
-        two-step, which is fine for them because they only ever touch empty or
-        just-collected partitions, not partitions being revised out from under other
-        readers. This method exists because refreshing a day that already has rows needs
-        stronger guarantees: a crash between archiving and replacing must not lose data
-        either way, and an API response that's merely smaller (not empty, not erroring)
-        must not silently replace good data with worse data.
+        never by the daily cron or gap repair. Those paths use `_delete_and_insert`, which
+        is also staged and transactional but does not write refresh history. This method
+        adds archive insertion and the minimum-row-ratio assertion needed when revising
+        an already populated day.
 
         Everything happens in one BigQuery script transaction: assert the new row count
         isn't suspiciously low relative to what's there now, archive the existing rows,
@@ -238,16 +244,15 @@ class BigQueryWriter:
         StagedTransactionalReplacer (same stage-then-transact shape, same retry
         vocabulary) without that module's reporting-ledger coupling.
 
-        Soft-guard note: this method makes ITS OWN operation atomic. It does not protect
-        against a genuinely concurrent writer (e.g. the daily cron's gap repair touching
-        the same activity_date at the same time) — that risk is accepted and mitigated by
-        scheduling, not by a lock. See the module docstring in analytics_refresh.py.
+        The daily and refresh entry points share the `analytics-writer` GCS lease. This
+        transaction also updates the analytics mutex, so a direct concurrent BigQuery
+        writer is forced through the same conflict boundary.
 
         Args:
             table_name: Live table, e.g. "daily_video_analytics".
             archive_table: Where the pre-replace rows go, e.g.
                 "daily_video_analytics_refresh_archive".
-            new_rows: Freshly fetched rows for activity_date. Must be non-empty — the
+            new_rows: Freshly fetched rows for activity_date. Must be non-empty. The
                 caller's own zero-row guard decides whether to call this at all.
             activity_date: The day being refreshed.
             snapshot_date: The day this refresh run happened (stamped like any other write).
@@ -256,7 +261,7 @@ class BigQueryWriter:
                 that touched it, and is what the before/after diff query filters on.
             min_row_ratio: Refuse the replacement if the new row count is below this
                 fraction of the existing row count for the day. This threshold is a
-                business-rule decision, not a code default — callers must pass it
+                business-rule decision, not a code default. Callers must pass it
                 explicitly (see REFRESH_MIN_ROW_RATIO in analytics_refresh.py).
 
         Returns:
@@ -292,6 +297,11 @@ class BigQueryWriter:
             script = f"""
 BEGIN
   BEGIN TRANSACTION;
+
+  UPDATE `{self.dataset_ref}.pipeline_write_mutex_analytics`
+  SET touched_at = CURRENT_TIMESTAMP()
+  WHERE mutex_name = 'analytics';
+  ASSERT @@row_count = 1 AS 'refused: analytics pipeline write mutex must contain exactly one row';
 
   IF (SELECT COUNT(*) FROM `{work_ref}`) <
      @min_row_ratio * (SELECT COUNT(*) FROM `{table_ref}` WHERE activity_date = @activity_date)
@@ -335,7 +345,7 @@ END;
         """Load rows into a real, expiring work table with the live table's own schema.
 
         BigQuery CREATE TEMP TABLE cannot back a load job and DDL cannot run inside a
-        transaction, so this is a real table — random-suffixed name, expiry set at
+        transaction, so this is a real table with a random-suffixed name and expiry set at
         creation so a crash before _drop_work_table runs still cleans up within an hour.
         An explicit schema (not NDJSON autodetect) matters here specifically because
         autodetect would type activity_date as STRING, which then fails to UNION/INSERT
@@ -349,6 +359,7 @@ END;
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             schema=schema,
+            labels=self.job_labels,
         )
         self.client.load_table_from_file(
             io.BytesIO(json_data.encode()), work_ref, job_config=load_job_config
@@ -363,7 +374,10 @@ END;
     def _run_transactional_script_with_retry(
         self, script: str, params: list[Any]
     ) -> None:
-        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=params,
+            labels=self.job_labels,
+        )
         for attempt in range(_REFRESH_TRANSIENT_RETRIES + 1):
             try:
                 self.client.query(script, job_config=job_config).result()
@@ -421,37 +435,48 @@ END;
             )
             return 0
 
-        # Stamp the partition column, then delete, then insert.
+        # Stamp and stage the complete replacement before the transaction can delete.
         for row in rows:
             row[partition_column] = str(partition_value)
 
-        delete_query = (
-            f"DELETE FROM `{table_ref}` WHERE {partition_column} = @partition_value"
-        )
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter(
-                    "partition_value", "DATE", str(partition_value)
-                )
-            ]
-        )
-        self.client.query(delete_query, job_config=job_config).result()
-        logger.info(
-            f"Deleted existing rows from {table_name} for "
-            f"{partition_column}={partition_value}"
-        )
+        live_schema = self.client.get_table(table_ref).schema
+        columns = [field.name for field in live_schema]
+        col_list = ", ".join(columns)
+        work_ref = f"{self.dataset_ref}._write_{table_name}_{uuid.uuid4().hex[:8]}"
+        try:
+            self._stage_refresh_rows(work_ref, live_schema, rows)
+            script = f"""
+BEGIN
+  BEGIN TRANSACTION;
 
-        json_data = "\n".join(json.dumps(row) for row in rows)
-        load_job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-        )
-        load_job = self.client.load_table_from_file(
-            io.BytesIO(json_data.encode()),
-            table_ref,
-            job_config=load_job_config,
-        )
-        load_job.result()  # Wait for completion
+  UPDATE `{self.dataset_ref}.pipeline_write_mutex_analytics`
+  SET touched_at = CURRENT_TIMESTAMP()
+  WHERE mutex_name = 'analytics';
+  ASSERT @@row_count = 1 AS 'refused: analytics pipeline write mutex must contain exactly one row';
+
+  IF (SELECT COUNT(*) FROM `{work_ref}`) = 0 THEN
+    RAISE USING MESSAGE = 'refused: staged analytics replacement has zero rows';
+  END IF;
+  IF (SELECT COUNT(DISTINCT {partition_column}) FROM `{work_ref}`) != 1
+     OR (SELECT ANY_VALUE({partition_column}) FROM `{work_ref}`) != @partition_value THEN
+    RAISE USING MESSAGE = 'refused: staged analytics rows do not match the requested partition';
+  END IF;
+
+  DELETE FROM `{table_ref}` WHERE {partition_column} = @partition_value;
+  INSERT INTO `{table_ref}` ({col_list}) SELECT {col_list} FROM `{work_ref}`;
+
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE USING MESSAGE = @@error.message;
+END;
+"""
+            params = [
+                bigquery.ScalarQueryParameter("partition_value", "DATE", str(partition_value))
+            ]
+            self._run_transactional_script_with_retry(script, params)
+        finally:
+            self._drop_work_table(work_ref)
 
         logger.info(f"Inserted {len(rows)} rows into {table_name}")
         return len(rows)

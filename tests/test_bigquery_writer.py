@@ -36,13 +36,33 @@ class FakeClient:
 
     def __init__(self):
         self.events = []
+        self.last_query_config = None
+        self.last_load_config = None
+
+    def get_table(self, table_ref):
+        self.events.append(("get_table", table_ref))
+        return _FakeTable([
+            bigquery.SchemaField("snapshot_date", "DATE"),
+            bigquery.SchemaField("activity_date", "DATE"),
+            bigquery.SchemaField("video_id", "STRING"),
+            bigquery.SchemaField("load_source", "STRING"),
+        ])
+
+    def create_table(self, table):
+        self.events.append(("create_table", table.table_id))
+        return table
+
+    def delete_table(self, table_ref, not_found_ok=True):
+        self.events.append(("delete_table", table_ref))
 
     def query(self, sql, job_config=None):
+        self.last_query_config = job_config
         params = {p.name: str(p.value) for p in (job_config.query_parameters if job_config else [])}
         self.events.append(("query", sql, params))
         return FakeJob(self.events, "query")
 
     def load_table_from_file(self, fh, table_ref, job_config=None):
+        self.last_load_config = job_config
         rows = [json.loads(line) for line in fh.read().decode().splitlines()]
         self.events.append(("load", table_ref, rows))
         return FakeJob(self.events, "load")
@@ -53,6 +73,7 @@ def writer():
     w = BigQueryWriter.__new__(BigQueryWriter)
     w.client = FakeClient()
     w.dataset_ref = "proj.ds"
+    w.job_labels = {}
     return w
 
 
@@ -68,12 +89,29 @@ def test_zero_rows_never_deletes(writer):
     assert writer.client.events == [], "an empty response is not a licence to erase a partition"
 
 
-def test_delete_completes_before_load_starts(writer):
+def test_rows_are_staged_before_atomic_replace_transaction(writer):
     rows = [{"video_id": "v1", "estimated_minutes_watched": 1.0}]
     assert writer.write_daily_video_analytics(rows, date(2026, 9, 4), date(2026, 8, 30)) == 1
-    # The DELETE's .result() must be awaited before the load job is submitted, or the two
-    # could race and the load land before the delete.
-    assert kinds(writer) == ["query", "query_result", "load", "load_result"]
+    assert kinds(writer) == [
+        "get_table", "create_table", "load", "load_result", "query", "query_result", "delete_table",
+    ]
+    script = [e for e in writer.client.events if e[0] == "query"][0][1]
+    assert script.index("BEGIN TRANSACTION") < script.index("DELETE FROM `proj.ds.daily_video_analytics`")
+    assert script.index("DELETE FROM `proj.ds.daily_video_analytics`") < script.index("COMMIT TRANSACTION")
+    assert "UPDATE `proj.ds.pipeline_write_mutex_analytics`" in script
+    assert "ASSERT @@row_count = 1" in script
+    assert "ROLLBACK TRANSACTION" in script
+    assert "refused: staged analytics replacement has zero rows" in script
+    assert "refused: staged analytics rows do not match the requested partition" in script
+
+
+def test_analytics_writer_labels_stage_and_transaction_jobs(writer):
+    writer.job_labels = {"pipeline_run_id": "abc123", "pipeline_writer": "analytics"}
+    writer.write_daily_video_analytics(
+        [{"video_id": "v1"}], date(2026, 9, 4), date(2026, 8, 30)
+    )
+    assert writer.client.last_load_config.labels == writer.job_labels
+    assert writer.client.last_query_config.labels == writer.job_labels
 
 
 def test_daily_video_analytics_keys_delete_on_activity_date(writer):
@@ -81,11 +119,11 @@ def test_daily_video_analytics_keys_delete_on_activity_date(writer):
         [{"video_id": "v1"}], snapshot_date=date(2026, 9, 4), activity_date=date(2026, 8, 30),
         load_source="recovery_20260829",
     )
-    _, sql, params = writer.client.events[0]
+    _, sql, params = [e for e in writer.client.events if e[0] == "query"][0]
     assert "DELETE FROM `proj.ds.daily_video_analytics` WHERE activity_date = @partition_value" in sql
-    assert "snapshot_date" not in sql
+    assert "WHERE snapshot_date = @partition_value" not in sql
     assert params == {"partition_value": "2026-08-30"}
-    loaded = writer.client.events[2][2]
+    loaded = [e for e in writer.client.events if e[0] == "load"][0][2]
     assert loaded[0] == {
         "video_id": "v1", "snapshot_date": "2026-09-04", "load_source": "recovery_20260829",
         "activity_date": "2026-08-30",
@@ -97,11 +135,11 @@ def test_daily_traffic_sources_keys_delete_on_activity_date(writer):
     writer.write_daily_traffic_sources(
         rows, snapshot_date=date(2026, 9, 4), activity_date=date(2026, 8, 30), load_source="gap_repair",
     )
-    _, sql, params = writer.client.events[0]
+    _, sql, params = [e for e in writer.client.events if e[0] == "query"][0]
     assert "DELETE FROM `proj.ds.daily_traffic_sources` WHERE activity_date = @partition_value" in sql
     assert params == {"partition_value": "2026-08-30"}
-    _, table_ref, loaded = writer.client.events[2]
-    assert table_ref == "proj.ds.daily_traffic_sources"
+    _, table_ref, loaded = [e for e in writer.client.events if e[0] == "load"][0]
+    assert table_ref.startswith("proj.ds._write_daily_traffic_sources_")
     assert loaded[0]["activity_date"] == "2026-08-30"
     assert loaded[0]["snapshot_date"] == "2026-09-04"
     assert loaded[0]["load_source"] == "gap_repair"
@@ -116,21 +154,25 @@ def test_snapshot_tables_key_delete_on_snapshot_date(writer):
     }]
     writer.write_video_metadata(videos, date(2026, 9, 4))
     writer.write_daily_video_stats(videos, date(2026, 9, 4))
-    assert kinds(writer) == ["query", "query_result", "load", "load_result"] * 2
+    assert kinds(writer) == [
+        "get_table", "create_table", "load", "load_result", "query", "query_result", "delete_table",
+    ] * 2
     queries = [e for e in writer.client.events if e[0] == "query"]
-    assert [q[1].split("`")[1] for q in queries] == ["proj.ds.video_metadata", "proj.ds.daily_video_stats"]
+    assert "DELETE FROM `proj.ds.video_metadata`" in queries[0][1]
+    assert "DELETE FROM `proj.ds.daily_video_stats`" in queries[1][1]
     for _, sql, params in queries:
         assert "WHERE snapshot_date = @partition_value" in sql
         assert params == {"partition_value": "2026-09-04"}
     loads = [e for e in writer.client.events if e[0] == "load"]
-    assert [l[1] for l in loads] == ["proj.ds.video_metadata", "proj.ds.daily_video_stats"]
+    assert loads[0][1].startswith("proj.ds._write_video_metadata_")
+    assert loads[1][1].startswith("proj.ds._write_daily_video_stats_")
     assert loads[0][2][0]["snapshot_date"] == "2026-09-04"
     assert "view_count" not in loads[0][2][0] and "title" not in loads[1][2][0]
 
 
 def test_load_source_defaults_to_cron(writer):
     writer.write_daily_video_analytics([{"video_id": "v1"}], date(2026, 9, 4), date(2026, 8, 30))
-    assert writer.client.events[2][2][0]["load_source"] == "cron"
+    assert [e for e in writer.client.events if e[0] == "load"][0][2][0]["load_source"] == "cron"
 
 
 def test_count_rows_for_activity_date_parameterises_query(writer):
@@ -210,6 +252,7 @@ def archive_writer():
     w = BigQueryWriter.__new__(BigQueryWriter)
     w.client = ArchiveReplaceFakeClient()
     w.dataset_ref = "proj.ds"
+    w.job_labels = {}
     return w
 
 
@@ -241,14 +284,16 @@ def test_archive_and_replace_stamps_rows_and_orders_archive_before_delete_before
     ], "get the live schema, stage the work table, run the one transaction, then drop the work table"
 
     script = [e for e in archive_writer.client.events if e[0] == "query"][0][1]
+    mutex_pos = script.index("UPDATE `proj.ds.pipeline_write_mutex_analytics`")
     archive_pos = script.index("INSERT INTO `proj.ds.daily_video_analytics_refresh_archive`")
     delete_pos = script.index("DELETE FROM `proj.ds.daily_video_analytics`")
     insert_pos = script.index("INSERT INTO `proj.ds.daily_video_analytics`")
-    assert archive_pos < delete_pos < insert_pos, (
+    assert mutex_pos < archive_pos < delete_pos < insert_pos, (
         "archiving the OLD rows must happen before they are deleted, and deleting must "
         "happen before the NEW rows are inserted, or the archive would capture the "
         "wrong generation or the table would be briefly empty for readers"
     )
+    assert "ASSERT @@row_count = 1" in script
 
 
 def test_archive_and_replace_threads_refresh_run_id_and_min_row_ratio(archive_writer):

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 import partition_replacer as pr
+import reporting_loader
 from report_specs import SPECS
 from reporting_loader import IngestLedger, ReportingLoader, RunSummary
 from youtube_reporting_api import ReportRef
@@ -177,6 +178,56 @@ def test_max_reports_per_run_takes_oldest_first_and_reports_deferred():
     assert client.downloaded == ["r0", "r1"] and s.deferred == 3
 
 
+def test_work_budget_stops_before_starting_another_report(caplog):
+    refs = [ref(f"r{i}", f"2026-08-{10 + i:02d}", "2026-09-05T00:00:00") for i in range(3)]
+    bodies = {r.report_id: (HDR + f"{r.report_date.replace('-', '')},UC1,v1,1,0\n").encode() for r in refs}
+    now = [0.0]
+
+    class AdvancingReplacer(FakeReplacer):
+        def replace_partition(self, spec, rows, provenance):
+            result = super().replace_partition(spec, rows, provenance)
+            now[0] = 11.0
+            return result
+
+    loader, client, _, replacer = make(
+        refs, bodies, replacer=AdvancingReplacer(), work_deadline=10.0, clock=lambda: now[0]
+    )
+    with caplog.at_level("WARNING"):
+        summary = loader.run()
+
+    assert client.downloaded == ["r0"]
+    assert len(replacer.calls) == 1
+    assert summary.loaded == 1
+    assert summary.budget_deferred == 2
+    assert summary.deferred == 0
+    assert any(
+        record.getMessage().startswith(reporting_loader.BUDGET_DEFERRED_LOG)
+        for record in caplog.records
+    )
+
+
+def test_terminal_mutex_contention_stops_without_marking_ledger_failed(caplog):
+    refs = [ref(f"r{i}", f"2026-08-{10 + i:02d}", "2026-09-05T00:00:00") for i in range(3)]
+    bodies = {r.report_id: (HDR + f"{r.report_date.replace('-', '')},UC1,v1,1,0\n").encode() for r in refs}
+
+    class ContendedReplacer(FakeReplacer):
+        def replace_partition(self, spec, rows, provenance):
+            raise pr.ConcurrentRunDetected("transaction is aborted due to concurrent update")
+
+    loader, client, ledger, _ = make(refs, bodies, replacer=ContendedReplacer())
+    with caplog.at_level("WARNING"):
+        summary = loader.run()
+
+    assert client.downloaded == ["r0"]
+    assert summary.failed == 0
+    assert summary.concurrency_deferred == 3
+    assert not [mark for mark in ledger.marks if mark[1] == "failed"]
+    assert any(
+        record.getMessage().startswith(reporting_loader.CONCURRENCY_DEFERRED_LOG)
+        for record in caplog.records
+    )
+
+
 def test_unregistered_report_type_is_skipped_with_warning(caplog):
     client = FakeClient([{"id": "j", "reportTypeId": "channel_mystery_a9", "name": "x"}], {}, {})
     loader = ReportingLoader(client, FakeReplacer(), FakeLedger(), "p.ds", archive=None)
@@ -191,6 +242,9 @@ def test_unregistered_report_type_is_skipped_with_warning(caplog):
 def test_replace_script_asserts_before_it_deletes():
     script = pr.build_replace_script("p.ds", REACH, "_load_x")
     delete_at = script.index("DELETE FROM `p.ds.reporting_channel_reach_basic_a1`")
+    assert script.index("UPDATE `p.ds.pipeline_write_mutex_reporting`") < script.index("this report_id is already loaded")
+    assert "WHERE mutex_name = 'reporting'" in script
+    assert "ASSERT @@row_count = 1" in script
     for guard in [
         "work table has zero rows",
         "not all for the expected report_date",
@@ -450,9 +504,14 @@ def test_classify_error_and_retry_with_backoff_on_transient():
         rep._run_with_retries("x", [])
     assert rep.client.calls == 3
     rep = pr.StagedTransactionalReplacer(Client(["Transaction is aborted due to concurrent update"] * 4), "p.ds", "UC1")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(pr.ConcurrentRunDetected):
         rep._run_with_retries("x", [])
     assert rep.client.calls == 4, "initial + 3 retries, then give up"
+    rep = pr.StagedTransactionalReplacer(Client(["503 backendError"] * 4), "p.ds", "UC1")
+    with pytest.raises(RuntimeError, match="backendError") as error:
+        rep._run_with_retries("x", [])
+    assert not isinstance(error.value, pr.ConcurrentRunDetected)
+    assert rep.client.calls == 4, "non-contention transients retry, then remain ordinary report failures"
     rep = pr.StagedTransactionalReplacer(Client(["Not found"]), "p.ds", "UC1")
     with pytest.raises(RuntimeError):
         rep._run_with_retries("x", [])
@@ -460,6 +519,29 @@ def test_classify_error_and_retry_with_backoff_on_transient():
     rep = pr.StagedTransactionalReplacer(Client(["already_loaded: x"]), "p.ds", "UC1")
     with pytest.raises(pr.AlreadyLoaded):
         rep._run_with_retries("x", [])
+
+
+def test_transient_retry_log_redacts_sensitive_values(caplog):
+    class Client:
+        calls = 0
+
+        def query(self, sql, job_config=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("503 backendError?access_token=private-value")
+
+            class Result:
+                def result(self):
+                    return None
+
+            return Result()
+
+    rep = pr.StagedTransactionalReplacer(Client(), "p.ds", "UC1")
+    with caplog.at_level("WARNING"):
+        rep._run_with_retries("x", [])
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("access_token=<redacted>" in message for message in messages)
+    assert all("private-value" not in message for message in messages)
 
 
 def test_work_table_name_is_unique_per_call_and_expiry_set_at_creation():
@@ -510,3 +592,52 @@ def test_replace_partition_does_not_mutate_caller_rows():
     pr.StagedTransactionalReplacer(C(), "p.ds", "UC1").replace_partition(
         REACH, rows, {"report_id": "r", "job_id": "j", "report_create_time": "2026-09-05T00:00:00+00:00", "load_source": "t"})
     assert rows == before
+
+
+def test_staged_replacer_labels_load_and_transaction_jobs():
+    class Job:
+        def result(self):
+            return None
+
+    class Client:
+        def __init__(self):
+            self.load_config = None
+            self.query_config = None
+
+        def create_table(self, table):
+            return table
+
+        def load_table_from_file(self, payload, table_ref, job_config=None):
+            self.load_config = job_config
+            return Job()
+
+        def query(self, script, job_config=None):
+            self.query_config = job_config
+            return Job()
+
+        def delete_table(self, table_ref, not_found_ok=True):
+            pass
+
+    client = Client()
+    labels = {"pipeline_run_id": "abc123", "pipeline_writer": "reporting"}
+    replacer = pr.StagedTransactionalReplacer(
+        client, "p.ds", "UC1", job_labels=labels
+    )
+    replacer.replace_partition(
+        REACH,
+        [{
+            "report_date": "2026-08-31",
+            "channel_id": "UC1",
+            "video_id": "v",
+            "video_thumbnail_impressions": 1,
+            "video_thumbnail_impressions_ctr": 0.1,
+        }],
+        {
+            "report_id": "r",
+            "job_id": "j",
+            "report_create_time": "2026-09-01T00:00:00+00:00",
+            "load_source": "cron",
+        },
+    )
+    assert client.load_config.labels == labels
+    assert client.query_config.labels == labels

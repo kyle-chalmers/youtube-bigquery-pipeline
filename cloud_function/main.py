@@ -16,6 +16,13 @@ import functions_framework
 
 from bigquery_writer import BigQueryWriter
 from log_safety import redact
+from run_lease import (
+    LEASE_EXPIRED_LOG,
+    LEASE_HELD_LOG,
+    ExpiredLease,
+    LeaseHeld,
+    build_run_lease,
+)
 from youtube_data_api import YouTubeDataAPI
 
 # ─── Structured Logging Setup ────────────────────────────────────
@@ -50,11 +57,13 @@ PIPELINE_TZ = ZoneInfo(os.environ.get("PIPELINE_TZ", "America/Phoenix"))
 
 # Was 3, which is exactly the edge of YouTube Analytics availability: probing on
 # 2026-08-29 showed T-0/T-1/T-2 empty and T-3 the first populated day. A single day
-# of extra latency therefore returned nothing. 5 buys margin; GAP_LOOKBACK_DAYS
+# of extra latency therefore returned nothing. 6 buys margin; GAP_LOOKBACK_DAYS
 # catches whatever still slips through.
-ANALYTICS_LOOKBACK_DAYS = int(os.environ.get("ANALYTICS_LOOKBACK_DAYS", "5"))
+ANALYTICS_LOOKBACK_DAYS = int(os.environ.get("ANALYTICS_LOOKBACK_DAYS", "6"))
 GAP_LOOKBACK_DAYS = int(os.environ.get("GAP_LOOKBACK_DAYS", "21"))
 MAX_GAP_REPAIRS_PER_RUN = int(os.environ.get("MAX_GAP_REPAIRS_PER_RUN", "5"))
+LOCK_BUCKET = os.environ.get("PIPELINE_LOCK_BUCKET", "")
+LEASE_TTL_SECONDS = int(os.environ.get("RUN_LEASE_TTL_SECONDS", "2100"))
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +86,13 @@ def main(request) -> tuple[dict, int]:
         snapshot_date = datetime.now(PIPELINE_TZ).date()
         log.info(f"Pipeline started — snapshot_date={snapshot_date}, run_id={run_id}")
 
-        result = run_pipeline(snapshot_date, log)
+        lease = build_run_lease(
+            project_id=PROJECT_ID, bucket_name=LOCK_BUCKET, dataset=DATASET_ID,
+            domain="analytics-writer", run_id=run_id, entrypoint="main",
+            ttl_seconds=LEASE_TTL_SECONDS,
+        )
+        with lease:
+            result = run_pipeline(snapshot_date, log, run_id=run_id)
         log.info(
             f"Pipeline complete — videos={result['videos_processed']}, "
             f"shorts={result['shorts']}, full_length={result['full_length']}, "
@@ -87,8 +102,18 @@ def main(request) -> tuple[dict, int]:
             f"traffic={result['rows_inserted']['daily_traffic_sources']}}}, "
             f"analytics_errors={len(result['analytics_errors'])}"
         )
+        result["run_id"] = run_id
         return result, 200
 
+    except LeaseHeld as e:
+        log.warning(f"{LEASE_HELD_LOG}: analytics-writer owner={e.record.owner}")
+        return {"skipped": True, "reason": "lease_held", "run_id": run_id, "owner": e.record.owner}, 200
+    except ExpiredLease as e:
+        log.error(
+            f"{LEASE_EXPIRED_LOG}: analytics-writer generation={e.record.generation} "
+            f"expired_at={e.record.expires_at.isoformat()}"
+        )
+        return {"error": "expired writer lease requires operator cleanup", "reason": "lease_expired", "run_id": run_id}, 500
     except Exception as e:
         # Not log.exception: the traceback and the message carry the request URL, which
         # for the Data API includes the API key. Both are redacted before logging.
@@ -96,7 +121,11 @@ def main(request) -> tuple[dict, int]:
         return {"error": redact(str(e))}, 500
 
 
-def run_pipeline(snapshot_date: date, log: logging.LoggerAdapter) -> dict:
+def run_pipeline(
+    snapshot_date: date,
+    log: logging.LoggerAdapter,
+    run_id: str | None = None,
+) -> dict:
     """Execute the full pipeline for a given snapshot date.
 
     Args:
@@ -111,7 +140,12 @@ def run_pipeline(snapshot_date: date, log: logging.LoggerAdapter) -> dict:
         api_key=YOUTUBE_API_KEY,
         uploads_playlist_id=UPLOADS_PLAYLIST_ID,
     )
-    bq_writer = BigQueryWriter(project_id=PROJECT_ID, dataset_id=DATASET_ID)
+    labels = {"pipeline_run_id": run_id, "pipeline_writer": "analytics"} if run_id else {}
+    bq_writer = BigQueryWriter(
+        project_id=PROJECT_ID,
+        dataset_id=DATASET_ID,
+        job_labels=labels,
+    )
 
     # Step 1: Fetch all video IDs
     video_ids = data_api.get_all_video_ids()
@@ -235,12 +269,10 @@ def _repair_gaps(
     writes nothing and no later run ever looks back. Every confirmed hole in this
     warehouse turned out to be recoverable by simply asking again later.
 
-    Shares BigQueryWriter._delete_and_insert's DELETE+INSERT semantics with the
-    trailing-30-day Analytics refresh job (cloud_function/analytics_refresh.py), and
-    their date windows overlap by design. The two are kept from racing on the same
-    partition only by Cloud Scheduler timing, not a lock — see the soft-guard invariant
-    documented at the top of analytics_refresh.py before changing this function's
-    schedule or window (GAP_LOOKBACK_DAYS, ANALYTICS_LOOKBACK_DAYS).
+    Shares BigQueryWriter._delete_and_insert's transactional replacement semantics with
+    the trailing-30-day Analytics refresh job (cloud_function/analytics_refresh.py), and
+    their date windows overlap by design. Both entry points use the same
+    `analytics-writer` GCS lease and BigQuery mutex.
 
     Returns:
         The activity dates repaired, as ISO strings.

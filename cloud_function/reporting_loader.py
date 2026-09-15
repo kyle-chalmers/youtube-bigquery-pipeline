@@ -24,6 +24,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -31,7 +32,7 @@ from typing import Any
 from google.cloud import bigquery
 
 from log_safety import redact
-from partition_replacer import AlreadyLoaded, PartitionReplacer, ReplaceRefused
+from partition_replacer import AlreadyLoaded, ConcurrentRunDetected, PartitionReplacer, ReplaceRefused
 from report_specs import LEDGER_TABLE, SPECS, ReportSpec
 from reporting_parser import parse_report
 from youtube_reporting_api import ReportRef, YouTubeReportingClient, newest_per_day
@@ -39,6 +40,8 @@ from youtube_reporting_api import ReportRef, YouTubeReportingClient, newest_per_
 logger = logging.getLogger(__name__)
 
 HEADER_ONLY_CONFLICT_LOG = "Reporting header-only report supersedes populated day"
+BUDGET_DEFERRED_LOG = "Reporting work budget exhausted"
+CONCURRENCY_DEFERRED_LOG = "Reporting transaction contention deferred remaining work"
 TERMINAL_OK = ("loaded", "header_only", "header_only_conflict")
 
 
@@ -55,6 +58,8 @@ class RunSummary:
     failed: int = 0
     deferred: int = 0
     retried_failed: int = 0
+    budget_deferred: int = 0
+    concurrency_deferred: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -73,14 +78,29 @@ class IngestLedger:
     replaced the partition) may move a loaded row, and only to `superseded`.
     """
 
-    def __init__(self, client: bigquery.Client, dataset_ref: str) -> None:
+    def __init__(
+        self,
+        client: bigquery.Client,
+        dataset_ref: str,
+        job_labels: dict[str, str] | None = None,
+    ) -> None:
         self.client = client
         self.table = f"`{dataset_ref}.{LEDGER_TABLE}`"
+        self.job_labels = dict(job_labels or {})
+
+    def _query_config(self, params: list[Any] | None = None) -> bigquery.QueryJobConfig:
+        return bigquery.QueryJobConfig(
+            query_parameters=params or [],
+            labels=self.job_labels,
+        )
 
     def load_state(self) -> dict[str, dict[str, Any]]:
         """{report_id: row} for every ledger row."""
         query = f"SELECT report_id, job_id, report_type, report_date, report_create_time, status FROM {self.table}"
-        return {r["report_id"]: dict(r) for r in self.client.query(query).result()}
+        return {
+            r["report_id"]: dict(r)
+            for r in self.client.query(query, job_config=self._query_config()).result()
+        }
 
     def loaded_generation(self, state: dict[str, dict[str, Any]], job_id: str, report_date: str) -> datetime | None:
         """create_time of the currently loaded report for (job, day), if any."""
@@ -119,18 +139,23 @@ class IngestLedger:
             bigquery.ScalarQueryParameter("load_source", "STRING", load_source),
             bigquery.ScalarQueryParameter("error", "STRING", (error or "")[:1000] or None),
         ]
-        self.client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        self.client.query(query, job_config=self._query_config(params)).result()
 
     def partition_row_count(self, dataset_ref: str, spec: ReportSpec, report_date: str) -> int:
         query = f"SELECT COUNT(*) AS n FROM `{dataset_ref}.{spec.table}` WHERE report_date = @d"
-        cfg = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("d", "DATE", report_date)])
+        cfg = self._query_config(
+            [bigquery.ScalarQueryParameter("d", "DATE", report_date)]
+        )
         return next(iter(self.client.query(query, job_config=cfg).result()))["n"]
 
     def newest_loaded_by_type(self) -> dict[str, str]:
         """{report_type: newest report_date with status loaded or header_only} as ISO strings."""
         query = (f"SELECT report_type, CAST(MAX(report_date) AS STRING) AS d FROM {self.table} "
                  f"WHERE status IN ('loaded', 'header_only') GROUP BY 1")
-        return {r["report_type"]: r["d"] for r in self.client.query(query).result()}
+        return {
+            r["report_type"]: r["d"]
+            for r in self.client.query(query, job_config=self._query_config()).result()
+        }
 
 
 class GcsArchive:
@@ -180,6 +205,8 @@ class ReportingLoader:
         max_failed_retries_per_run: int = 5,
         load_source: str = "cron",
         specs: dict[str, ReportSpec] | None = None,
+        work_deadline: float | None = None,
+        clock: Any = time.monotonic,
     ) -> None:
         self.client = client
         self.replacer = replacer
@@ -190,6 +217,8 @@ class ReportingLoader:
         self.max_failed_retries_per_run = max_failed_retries_per_run
         self.load_source = load_source
         self.specs = specs or SPECS
+        self.work_deadline = work_deadline
+        self.clock = clock
         self._older_siblings: dict[str, list[ReportRef]] = {}
 
     def run(self) -> RunSummary:
@@ -239,8 +268,21 @@ class ReportingLoader:
             summary.deferred += len(candidates) - self.max_reports_per_run
             candidates = candidates[: self.max_reports_per_run]
 
-        for ref in candidates:
-            self._ingest_one(ref, state, summary)
+        for index, ref in enumerate(candidates):
+            remaining = len(candidates) - index
+            if self.work_deadline is not None and self.clock() >= self.work_deadline:
+                summary.budget_deferred += remaining
+                logger.warning(f"{BUDGET_DEFERRED_LOG}: {remaining} report(s) left untouched")
+                break
+            try:
+                self._ingest_one(ref, state, summary)
+            except ConcurrentRunDetected as error:
+                summary.concurrency_deferred += remaining
+                logger.warning(
+                    f"{CONCURRENCY_DEFERRED_LOG}: {remaining} report(s) left untouched: "
+                    f"{redact(str(error))}"
+                )
+                break
         return summary
 
     def _fail(self, ref: ReportRef, summary: RunSummary, err: str, **kw: Any) -> None:
@@ -293,6 +335,10 @@ class ReportingLoader:
         except ReplaceRefused as e:
             self._fail(ref, summary, str(e), **meta)
             return
+        except ConcurrentRunDetected:
+            # A competing transaction may still commit. Any ledger write here could race
+            # with that commit and recreate the duplicate-ledger incident.
+            raise
         except Exception as e:  # noqa: BLE001 - a BigQuery error on one report must not abort the run
             self._fail(ref, summary, f"{type(e).__name__}: {redact(str(e))}", **meta)
             return

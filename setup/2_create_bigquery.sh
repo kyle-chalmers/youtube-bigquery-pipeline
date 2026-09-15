@@ -43,5 +43,13 @@ sed "s/\${BQ_DATASET}/$DATASET/g" "$REPO_ROOT/sql/reporting_tables.sql" | bq que
     --nouse_cache
 
 echo ""
+echo "Creating and validating the preseeded writer mutex rows..."
+sed "s/\${BQ_DATASET}/$DATASET/g" "$REPO_ROOT/sql/pipeline_write_mutex.sql" | bq query \
+    --project_id="$PROJECT_ID" \
+    --location="$LOCATION" \
+    --use_legacy_sql=false \
+    --nouse_cache
+
+echo ""
 echo "BigQuery setup complete. Tables in $DATASET:"
 bq ls --project_id="$PROJECT_ID" "$DATASET"

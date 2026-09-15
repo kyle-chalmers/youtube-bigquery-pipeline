@@ -23,7 +23,9 @@ set -euo pipefail
 # Env: GCP_PROJECT (or active gcloud project), GCP_REGION (default us-central1),
 #      YOUTUBE_CHANNEL_ID (required), BQ_DATASET (default youtube_analytics),
 #      REPORTING_ENABLED (required for the prod function; default true for staging), MAX_REPORTS_PER_RUN (default 30),
-#      REPORTING_STALE_DAYS (default 4), REPORTING_ARCHIVE_BUCKET (default <project>-youtube-reporting-raw).
+#      REPORTING_STALE_DAYS (default 4), REPORTING_ARCHIVE_BUCKET (default <project>-youtube-reporting-raw),
+#      CONFIGURE_ARCHIVE_IAM (default true), REPORTING_RUNTIME_BUDGET_SECONDS (default 1200),
+#      PIPELINE_LOCK_BUCKET (required and environment-specific), RUN_LEASE_TTL_SECONDS (default 2100).
 
 PROJECT_ID="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 : "${PROJECT_ID:?no GCP project: set GCP_PROJECT or gcloud config set project}"
@@ -41,6 +43,10 @@ REPORTING_ENABLED="${REPORTING_ENABLED:-true}"
 MAX_REPORTS_PER_RUN="${MAX_REPORTS_PER_RUN:-30}"
 REPORTING_STALE_DAYS="${REPORTING_STALE_DAYS:-4}"
 REPORTING_ARCHIVE_BUCKET="${REPORTING_ARCHIVE_BUCKET:-${PROJECT_ID}-youtube-reporting-raw}"
+CONFIGURE_ARCHIVE_IAM="${CONFIGURE_ARCHIVE_IAM:-true}"
+REPORTING_RUNTIME_BUDGET_SECONDS="${REPORTING_RUNTIME_BUDGET_SECONDS:-1200}"
+RUN_LEASE_TTL_SECONDS="${RUN_LEASE_TTL_SECONDS:-2100}"
+: "${PIPELINE_LOCK_BUCKET:?set PIPELINE_LOCK_BUCKET to the environment-specific writer-lock bucket}"
 : "${YOUTUBE_CHANNEL_ID:?set YOUTUBE_CHANNEL_ID (UC-prefixed) before deploying}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -52,6 +58,9 @@ fi
 if [[ "$FUNCTION_NAME" != "$PROD_FUNCTION" && "$BQ_DATASET" == "$PROD_DATASET" ]]; then
     echo "Refusing: a non-production function ($FUNCTION_NAME) pointed at the production dataset." >&2; exit 1
 fi
+source "$SCRIPT_DIR/deploy_safety.sh"
+validate_writer_deploy "$FUNCTION_NAME" "$BQ_DATASET" "$PIPELINE_LOCK_BUCKET" \
+    "$PROJECT_ID" 1500 "$RUN_LEASE_TTL_SECONDS" "$REPORTING_RUNTIME_BUDGET_SECONDS"
 
 echo "Deploying Cloud Function: $FUNCTION_NAME"
 echo "  Project: $PROJECT_ID   Region: $REGION"
@@ -69,23 +78,30 @@ gcloud functions deploy "$FUNCTION_NAME" \
     --trigger-http \
     --no-allow-unauthenticated \
     --memory=512MB \
-    --timeout=540s \
-    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=$BQ_DATASET,YOUTUBE_CHANNEL_ID=$YOUTUBE_CHANNEL_ID,REPORTING_ENABLED=$REPORTING_ENABLED,MAX_REPORTS_PER_RUN=$MAX_REPORTS_PER_RUN,REPORTING_STALE_DAYS=$REPORTING_STALE_DAYS,REPORTING_ARCHIVE_BUCKET=$REPORTING_ARCHIVE_BUCKET" \
+    --cpu=1 \
+    --timeout=1500s \
+    --max-instances=1 \
+    --concurrency=2 \
+    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=$BQ_DATASET,YOUTUBE_CHANNEL_ID=$YOUTUBE_CHANNEL_ID,REPORTING_ENABLED=$REPORTING_ENABLED,MAX_REPORTS_PER_RUN=$MAX_REPORTS_PER_RUN,REPORTING_STALE_DAYS=$REPORTING_STALE_DAYS,REPORTING_ARCHIVE_BUCKET=$REPORTING_ARCHIVE_BUCKET,REPORTING_RUNTIME_BUDGET_SECONDS=$REPORTING_RUNTIME_BUDGET_SECONDS,PIPELINE_LOCK_BUCKET=$PIPELINE_LOCK_BUCKET,RUN_LEASE_TTL_SECONDS=$RUN_LEASE_TTL_SECONDS" \
     --project="$PROJECT_ID"
 
-SERVICE_ACCOUNT=$(gcloud functions describe "$FUNCTION_NAME" --region="$REGION" --gen2 \
-    --format='value(serviceConfig.serviceAccountEmail)' --project="$PROJECT_ID")
-echo ""
-echo "Granting objectCreator + objectViewer on gs://$REPORTING_ARCHIVE_BUCKET to the function's service account (bucket-level only)..."
-# The loader only ever creates objects (if_generation_match=0) and reads metadata. It never
-# deletes or overwrites, so it does not get objectAdmin on the only durable copy of the reports.
-for role in roles/storage.objectCreator roles/storage.objectViewer; do
-    gcloud storage buckets add-iam-policy-binding "gs://$REPORTING_ARCHIVE_BUCKET" \
-        --member="serviceAccount:$SERVICE_ACCOUNT" --role="$role" --project="$PROJECT_ID" >/dev/null
-done
-gcloud storage buckets remove-iam-policy-binding "gs://$REPORTING_ARCHIVE_BUCKET" \
-    --member="serviceAccount:$SERVICE_ACCOUNT" --role="roles/storage.objectAdmin" --project="$PROJECT_ID" >/dev/null 2>&1 || true
-echo "granted (objectAdmin removed if it was present)"
+if [[ "$CONFIGURE_ARCHIVE_IAM" == "true" ]]; then
+    SERVICE_ACCOUNT=$(gcloud functions describe "$FUNCTION_NAME" --region="$REGION" --gen2 \
+        --format='value(serviceConfig.serviceAccountEmail)' --project="$PROJECT_ID")
+    echo ""
+    echo "Granting objectCreator + objectViewer on gs://$REPORTING_ARCHIVE_BUCKET to the function's service account (bucket-level only)..."
+    # The loader only ever creates objects (if_generation_match=0) and reads metadata. It never
+    # deletes or overwrites, so it does not get objectAdmin on the only durable copy of the reports.
+    for role in roles/storage.objectCreator roles/storage.objectViewer; do
+        gcloud storage buckets add-iam-policy-binding "gs://$REPORTING_ARCHIVE_BUCKET" \
+            --member="serviceAccount:$SERVICE_ACCOUNT" --role="$role" --project="$PROJECT_ID" >/dev/null
+    done
+    gcloud storage buckets remove-iam-policy-binding "gs://$REPORTING_ARCHIVE_BUCKET" \
+        --member="serviceAccount:$SERVICE_ACCOUNT" --role="roles/storage.objectAdmin" --project="$PROJECT_ID" >/dev/null 2>&1 || true
+    echo "granted (objectAdmin removed if it was present)"
+else
+    echo "Archive IAM unchanged (CONFIGURE_ARCHIVE_IAM=false)."
+fi
 
 echo ""
 echo "Deployment complete. Function URL:"
