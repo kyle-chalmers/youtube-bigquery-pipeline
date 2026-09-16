@@ -43,3 +43,10 @@ def resolve_project() -> str:
             "Run `gcloud config set project <id>` or export GCP_PROJECT."
         )
     return project
+
+
+def google_cloud_credentials():
+    """Use refreshable in-memory gcloud credentials when explicitly requested."""
+    from gcloud_credentials import credentials_from_environment
+
+    return credentials_from_environment()

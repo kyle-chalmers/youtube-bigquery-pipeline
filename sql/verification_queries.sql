@@ -213,9 +213,9 @@ ORDER BY peak_views DESC;
 
 -- ─── 9. Gap list: which activity days are missing ──────────────
 -- The single most important check.
--- The calendar stops 6 days back, one day of slack beyond the 5-day
--- ANALYTICS_LOOKBACK_DAYS, because anything newer has not been collected yet and
--- would read as a false alarm. Raise this number if the lookback is raised.
+-- The calendar includes 6 days back because a completed daily run must have
+-- collected T-6 under the current ANALYTICS_LOOKBACK_DAYS contract. Newer dates
+-- are excluded because they have not been collected yet.
 -- CURRENT_DATE is pinned to America/Phoenix on purpose. Bare CURRENT_DATE() is
 -- UTC, which after 5pm Phoenix rolls to tomorrow and reports a day the pipeline
 -- was never supposed to have yet. That is the same UTC-naive mistake the pipeline
@@ -301,15 +301,19 @@ ORDER BY load_source;
 -- ─── 12. Lookback health ───────────────────────────────────────
 -- The root cause of the missing days: the pipeline used to query exactly 3 days
 -- back, which is the precise edge of Analytics API availability, so a one-day
--- slip returned nothing. Lookback is now 5.
--- EXPECT: days_behind_today around 5, and never 0 to 2.
+-- slip returned nothing. Lookback is now 6.
+-- EXPECT after a completed daily run: days_behind_today = 6.
 --finding_3a_lookback
 SELECT
     MAX(activity_date) AS newest_activity_day,
     DATE_DIFF(CURRENT_DATE('America/Phoenix'), MAX(activity_date), DAY) AS days_behind_today,
-    CASE WHEN DATE_DIFF(CURRENT_DATE('America/Phoenix'), MAX(activity_date), DAY) <= 2
-         THEN '*** TOO CLOSE TO THE EDGE ***'
-         ELSE 'healthy margin' END AS verdict
+    CASE
+        WHEN DATE_DIFF(CURRENT_DATE('America/Phoenix'), MAX(activity_date), DAY) = 6
+            THEN 'healthy expected lag'
+        WHEN DATE_DIFF(CURRENT_DATE('America/Phoenix'), MAX(activity_date), DAY) < 6
+            THEN '*** UNEXPECTED FRESH DATE ***'
+        ELSE '*** STALE LATEST DATE ***'
+    END AS verdict
 FROM `youtube_analytics.daily_video_analytics`;
 
 

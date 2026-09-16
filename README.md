@@ -12,15 +12,34 @@ OAuth verification pages: [YouTube Analytics Pipeline](https://kyle-chalmers.git
 
 ## Architecture
 
-![Architecture](docs/diagrams/pipeline-after-hardening-2026-09.png)
+```mermaid
+flowchart LR
+    S[Cloud Scheduler] --> D[Daily Analytics]
+    S --> R[Reporting ingest]
+    S --> F[Weekly refresh]
+    D --> AL[Analytics writer lease]
+    F --> AL
+    R --> RL[Reporting writer lease]
+    AL --> AM[Analytics mutex]
+    RL --> RM[Reporting mutex]
+    AM --> AT[Staged Analytics transaction]
+    RM --> RT[Staged Reporting and ledger transaction]
+    AT --> BQ[(BigQuery)]
+    RT --> BQ
+    R --> AR[(Immutable report archive)]
+```
+
+Staging has the same shape with a separate dataset, lock bucket, functions, Scheduler jobs, and alert filters.
 
 Three Cloud Functions (2nd gen, Python 3.11) built from one source directory, each with its own Cloud Scheduler job:
 
-- **`youtube-bigquery-pipeline`**, nightly at 00:10 Phoenix (ten minutes after the Data API quota resets). Fetches the video catalogue and public counters from the Data API, and per-video metrics and traffic sources for the activity day six days back from the Analytics API. Writes the four original tables with a delete-then-load keyed on the activity date that refuses to delete when the API returned nothing; re-queries recent activity days that have no rows.
-- **`youtube-reporting-ingest`**, 08:00 and 14:00 Phoenix. Lists every report YouTube still retains for the channel's 19 Reporting API jobs, compares with a ledger, archives each new file to Cloud Storage, parses by header name, and replaces that day's partition in one BigQuery transaction guarded by assertions (rows present, one expected date, the configured channel, unique grain, no newer generation already loaded). A header-only report never deletes a populated day. `REPORTING_ENABLED` is a kill switch.
-- **`youtube-analytics-refresh`**, weekly on Sundays at 03:00 Phoenix, scheduled far from the 00:10 daily run on purpose. Re-fetches the trailing ~30 activity days and overwrites `daily_video_analytics`/`daily_traffic_sources` so revisions YouTube makes after the fact (up to ~30 days) are picked up, archiving the pre-refresh rows first for a before/after diff. Traffic sources use one range query for the whole window instead of one call per video per day (confirmed live: ~30 minutes down to under a second for 200+ videos). Its schedule separation from the daily function's gap repair is a deliberate, documented tradeoff, not an oversight — see `cloud_function/analytics_refresh.py`'s module docstring.
+- **`youtube-bigquery-pipeline`**, nightly at 00:10 Phoenix (ten minutes after the Data API quota resets). Fetches the video catalogue and public counters from the Data API, and per-video metrics and traffic sources for the configured activity day. It stages each replacement and commits it in one BigQuery transaction after validating the returned rows.
+- **`youtube-reporting-ingest`**, 08:00 and 14:00 Phoenix. Lists every report YouTube still retains for the channel's 19 Reporting API jobs, compares with a ledger, archives each new file to Cloud Storage, parses by header name, and replaces that day's partition and ledger state in one BigQuery transaction. The transaction validates the expected date, channel, native grain, row count, and report generation. A header-only report never deletes a populated day. `REPORTING_ENABLED` is a kill switch.
+- **`youtube-analytics-refresh`**, weekly on Sundays at 03:00 Phoenix. Re-fetches the trailing activity window and transactionally replaces `daily_video_analytics` and `daily_traffic_sources`, archiving the previous rows first. Traffic sources use one range query for the whole window instead of one call per video per day.
 
-Secrets (API key, OAuth client, refresh token) live in Secret Manager. One refresh token with the `yt-analytics.readonly` scope serves both the Analytics and the Reporting API, so the channel account and the cloud project can be different Google accounts. Everything runs inside the GCP free tier.
+Every writer first acquires an environment-specific Cloud Storage lease and then updates the singleton `analytics` or `reporting` BigQuery mutex inside its replacement transaction. The lease blocks overlapping invocations before staging begins. The mutex protects the final partition replacement. Staging and production use separate lock buckets.
+
+Secrets (API key, OAuth client, refresh token) live in Secret Manager. One refresh token with the `yt-analytics.readonly` scope serves both the Analytics and the Reporting API, so the channel account and the cloud project can be different Google accounts. Resource use is small, but the six-job staging and production Scheduler topology exceeds the three-job monthly free allowance.
 
 ## Why three YouTube APIs
 
@@ -39,7 +58,7 @@ The Reporting API is the only public source of impressions, CTR and engaged view
 
 `gcloud` (with `bq`), Python 3.11+, `git`, a Google Cloud project with billing enabled, and the Google account that owns the channel. Log in once with `gcloud auth login` (CLIs) and `gcloud auth application-default login` (the Python scripts); both expire and both are needed.
 
-Configuration is environment variables; `.env.example` lists them all (`YOUTUBE_API_KEY`, `YOUTUBE_CHANNEL_ID`, `GCP_PROJECT`, `GCP_REGION`, `BQ_DATASET`, and the `REPORTING_*` tuning values). Copy it to `.env` and never commit it. Owner-specific notes go in `.internal/` (gitignored).
+Configuration is environment variables; `.env.example` lists them all, including the environment-specific `PIPELINE_LOCK_BUCKET`, `RUN_LEASE_TTL_SECONDS`, and Reporting work budget. Copy it to `.env` and never commit it. Owner-specific notes go in `.internal/` (gitignored).
 
 ---
 
@@ -54,29 +73,32 @@ Each script is idempotent. Run them in this order; the reasons are in the adopti
 | 3 | `bash setup/3_setup_oauth.sh`, then `python3 setup/oauth_helper.py` | One-time consent as the channel owner; stores the refresh token and client credentials in Secret Manager. Add the channel account as a test user if it differs from the project account |
 | 4 | `gcloud secrets create youtube-data-api-key --data-file=-` | The Data API key, from stdin, never from a file left on disk |
 | 5 | `python3 setup/7_create_reporting_jobs.py --create`, then `python3 setup/archive_reporting_raw.py --verify` | Do this early: jobs start a 30-day backfill and files expire. Dry run without `--create` |
-| 6 | `bash setup/8_create_staging.sh` | Creates `youtube_analytics_staging` seeded from production; deploy both functions there first with `FUNCTION_NAME=...-staging BQ_DATASET=youtube_analytics_staging` |
-| 7 | `bash setup/4_deploy_function.sh` | The daily function. Sets every tuning variable explicitly (`ANALYTICS_LOOKBACK_DAYS=6`, `GAP_LOOKBACK_DAYS=21`, `MAX_GAP_REPAIRS_PER_RUN=5`) |
-| 8 | `REPORTING_ENABLED=false bash setup/9_deploy_reporting_function.sh`, backfill, then `REPORTING_ENABLED=true ...` | Deploy with the switch off, run `python3 setup/backfill_reporting.py --dataset youtube_analytics --from-gcs` then the same without `--from-gcs`, verify, then switch on. The flag has no default for production, so a redeploy cannot silently change it |
-| 9 | `bash setup/5_create_scheduler.sh` for each function; `ALERT_EMAIL=... bash setup/6_setup_monitoring.sh` | Ingest schedule is `FUNCTION_NAME=youtube-reporting-ingest JOB_NAME=youtube-reporting-daily SCHEDULE="0 8,14 * * *"`. The scheduler script grants its service account permission to invoke the function. Five email alerts: pipeline crash or empty analytics, Reporting load failure or conflict or switch left off, stale report type, Analytics refresh failure or incomplete day, scheduler failure |
-| 10 | `BQ_DATASET=youtube_analytics bash setup/10_create_views.sh` | The twelve views; views hold no data |
-| 11 | `REFRESH_TIMEOUT=... ANALYTICS_LOOKBACK_DAYS=... bash setup/12_deploy_refresh_function.sh`, then `FUNCTION_NAME=youtube-analytics-refresh JOB_NAME=youtube-analytics-refresh-weekly SCHEDULE="0 3 * * 0" ATTEMPT_DEADLINE=... MAX_RETRY_ATTEMPTS=0 bash setup/5_create_scheduler.sh` | Time a real run with `setup/refresh_analytics.py` against staging first and use that (with headroom) for `REFRESH_TIMEOUT`/`ATTEMPT_DEADLINE` — don't guess. `ANALYTICS_LOOKBACK_DAYS` must match the daily function's deployed value |
+| 6 | `bash setup/8_create_staging.sh` | Creates `youtube_analytics_staging` seeded from production, including its preseeded writer mutex rows |
+| 7 | `PIPELINE_LOCK_BUCKET="${GCP_PROJECT}-youtube-pipeline-locks-staging" bash setup/13_setup_run_locks.sh`, then repeat with a distinct `...-prod` bucket | Creates isolated lock buckets with uniform bucket-level access, public access prevention, and bucket-scoped `roles/storage.objectUser` |
+| 8 | Deploy all three writers to staging | Set each staging function name, `BQ_DATASET=youtube_analytics_staging`, and the staging lock bucket. The deploy scripts refuse production and staging crosses |
+| 9 | `PIPELINE_LOCK_BUCKET=... bash setup/4_deploy_function.sh` | Deploys the daily function with staged transactional writes, one maximum instance, and the Analytics writer lease |
+| 10 | `REPORTING_ENABLED=false PIPELINE_LOCK_BUCKET=... bash setup/9_deploy_reporting_function.sh`, backfill, then deploy with `REPORTING_ENABLED=true` | Deploys Reporting with a 1,500-second timeout, 1,200-second work budget, one maximum instance, and the Reporting writer lease. Production requires an explicit kill-switch value |
+| 11 | `REFRESH_TIMEOUT=... ANALYTICS_LOOKBACK_DAYS=... PIPELINE_LOCK_BUCKET=... bash setup/12_deploy_refresh_function.sh` | Time a real staging run first. The refresh uses the Analytics writer lease and the same transactional partition replacement as the daily writer |
+| 12 | `bash setup/5_create_scheduler.sh` for each function; `ALERT_EMAIL=... bash setup/6_setup_monitoring.sh` | Configure explicit job IDs, deadlines, retry policies, target services, and `ERROR` alert severity. Reporting uses a 1,800-second Scheduler deadline and zero retries |
+| 13 | `BQ_DATASET=youtube_analytics bash setup/10_create_views.sh` | Creates the twelve views; views hold no data |
 
-IAM for the function's service account: `cloudbuild.builds.builder`, `secretmanager.secretAccessor`, `bigquery.dataEditor`, `bigquery.jobUser`, and `storage.objectCreator` plus `objectViewer` on the archive bucket only (the deploy script grants those two).
+IAM for the function's service account: `cloudbuild.builds.builder`, `secretmanager.secretAccessor`, `bigquery.dataEditor`, and `bigquery.jobUser`. Reporting also receives `storage.objectCreator` plus `storage.objectViewer` on the archive bucket. Writers receive `storage.objectUser` on their environment's lock bucket only.
 
 ---
 
 ## Verification
 
-Nothing reaches production untested. Offline tests run on every push; the three verify scripts run the paste-ready SQL in `sql/verification/` against a dataset and fail on any wrong or empty result.
+Offline tests run on every push. The staging remediation verifier exercises lease contention, mutex refusal, concurrent transactions, rollback, repair, and alert scoping against staging resources. The read-only production proof pack is generated from the same report specification as the Reporting DDL.
 
 ```bash
 python3 -m pytest tests/ -q                                   # offline, no credentials
 bash scripts/verify_parity.sh                                 # staging (new code) vs prod (running code), same day, by business key
 bash scripts/verify_reporting.sh youtube_analytics            # grain, one report per day, ledger matches tables, cross-source reconciliation
 bash scripts/verify_views.sh youtube_analytics                # grain, no fan-out, ratios recomputed, calendar windows, Studio spot-check rows
+PIPELINE_LOCK_BUCKET=... bash scripts/verify_remediation_staging.sh  # destructive staging-only concurrency and repair rehearsal
 ```
 
-`sql/verification/prod_inventory.sql` lists every object and every write to the original tables. `docs/studio-comparison.md` says which YouTube Studio number to compare to which column and what will not match: Studio's counters keep moving after a report is generated, YouTube issues a replacement file only sometimes, and average view duration in Studio is watch time over *engaged* views.
+`sql/verification/production_proof.sql` contains the complete read-only production proof pack with project, dataset, and affected-date placeholders. `sql/verification/prod_inventory.sql` lists every object and every write to the original tables. `docs/studio-comparison.md` says which YouTube Studio number to compare to which column and what will not match: Studio's counters keep moving after a report is generated, YouTube issues a replacement file only sometimes, and average view duration in Studio is watch time over *engaged* views.
 
 To trigger a function by hand:
 
@@ -84,6 +106,25 @@ To trigger a function by hand:
 URL=$(gcloud functions describe youtube-bigquery-pipeline --region=us-central1 --gen2 --format='value(serviceConfig.uri)')
 curl -s -H "Authorization: bearer $(gcloud auth print-identity-token)" "$URL" | python3 -m json.tool
 ```
+
+### Expired lease recovery
+
+An expired lease fails closed and requires an operator check. Pause the matching Scheduler job, confirm that no Cloud Run request or manual writer is active, then inspect the exact lease record:
+
+```bash
+.venv/bin/python setup/manage_run_lease.py status \
+  --bucket "$PIPELINE_LOCK_BUCKET" --dataset "$BQ_DATASET" --domain reporting-writer
+```
+
+Clear only an expired lease by passing the generation returned by the fresh status command. The tool refuses a live lease, a changed generation, or a mismatched dataset confirmation.
+
+```bash
+.venv/bin/python setup/manage_run_lease.py clear \
+  --bucket "$PIPELINE_LOCK_BUCKET" --dataset "$BQ_DATASET" --domain reporting-writer \
+  --generation GENERATION --confirm-dataset "$BQ_DATASET" --confirm-no-active-writer
+```
+
+Use `analytics-writer` for the daily, refresh, Analytics backfill, and Analytics repair domain. Resume the Scheduler only after both the lease check and the relevant warehouse verifier pass.
 
 ---
 
@@ -154,18 +195,18 @@ FROM `youtube_analytics.channel_daily_summary`
 ORDER BY report_date DESC LIMIT 14;
 ```
 
-Historical backfill of the Analytics tables: `python3 setup/backfill_analytics.py --start YYYY-MM-DD --end YYYY-MM-DD` replaces whole activity days (delete keyed on `activity_date`, refuses to delete on an empty response); prefer narrow ranges. The Data API tables cannot be backfilled: they are snapshots of live counters.
+Historical backfill of the Analytics tables: `PIPELINE_LOCK_BUCKET=... python3 setup/backfill_analytics.py --start YYYY-MM-DD --end YYYY-MM-DD` stages and transactionally replaces whole activity days after validating the response; prefer narrow ranges. The Data API tables cannot be backfilled because they are snapshots of live counters.
 
 ---
 
 ## Cost
 
-Inside the GCP free tier at a personal-channel scale (204 videos, 55 MB of BigQuery storage):
+Expected usage for a small channel:
 
 | Service | Free tier | This pipeline |
 |---|---|---|
-| Cloud Functions | 2M invocations/month | about 94 (1 + 2 per day, plus 1/week) |
-| Cloud Scheduler | 3 jobs per billing account | 3 (at the free-tier limit — a 4th recurring job needs a paid billing account) |
+| Cloud Functions | 2M invocations/month | about 94 scheduled production invocations; paused staging functions run only during tests |
+| Cloud Scheduler | 3 jobs per billing account | 6 configured jobs: 3 enabled in production and 3 paused in staging. [Paused jobs count](https://cloud.google.com/scheduler/pricing), so 3 jobs are billable at the published per-job rate |
 | BigQuery | 10 GB storage, 1 TB queries/month | tens of MB, kilobytes per query |
 | Cloud Storage | 5 GB | a few MB of gzipped CSV |
 | YouTube Data API | 10,000 units/day, shared by every tool in the project | about 10 per run; one bulk upload elsewhere can exhaust it |
@@ -182,19 +223,19 @@ cloud_function/                # the only directory deployed
   report_specs.py              # schema registry for the 19 report types (source of the generated DDL)
   reporting_parser.py          # header-driven CSV parser, fails on schema drift
   reporting_loader.py          # newest-generation selection, ledger, archive
-  partition_replacer.py        # one-transaction partition replace with assertions
-  bigquery_writer.py           # delete-then-load for the four original tables
+  partition_replacer.py        # transactional Reporting replace, ledger update, mutex assertion
+  bigquery_writer.py           # staged transactional writes for the four original tables
+  run_lease.py                 # generation-bound Cloud Storage writer leases
   oauth_credentials.py, retry.py, log_safety.py
 setup/                         # numbered scripts in deployment order, plus backfills and the DDL generator
-scripts/                       # verify_parity.sh, verify_reporting.sh, verify_views.sh, check_recent_runs.sh, verify_audit_fixes.sh,
-                               # test_regeneration_staging.sh, test_concurrent_staging.sh (staging-only behaviour tests)
+scripts/                       # warehouse verifiers, staging concurrency tests, alert-scope checks, production evidence tools
 sql/
   create_tables.sql            # DDL for the 4 original tables
   reporting_tables.sql         # GENERATED DDL, 19 tables + ledger
   views/                       # the twelve views, one file each
-  verification/                # paste-ready blocks per phase, plus prod_inventory.sql
+  verification/                # paste-ready checks, generated production proof pack, and prod_inventory.sql
   sample_queries.sql, verification_queries.sql
-tests/                         # offline pytest suite (165 tests)
+tests/                         # offline pytest suite
 docs/
   adopt-for-your-channel.md    # how another channel owner sets this up, with an agent prompt
   studio-comparison.md         # which Studio number to compare to which column, and why some differ
@@ -205,6 +246,6 @@ docs/
 
 ---
 
-## What is next
+## Maintenance notes
 
-Phase 4 of the hardening plan, in a separate session: a weekly re-query of the trailing 30 days of the Analytics tables so past days pick up YouTube's revisions; traffic-source gap repair including partially failed days; moving the four original tables onto the transactional writer; expiry, growth and missing-run tripwires; self-describing DDL with links to YouTube's report documentation. Still uncaptured from the Data API: `description`, language, `liveBroadcastContent`, `topicCategories`, `caption`. Per-video audience retention curves are Analytics API only and a candidate for a weekly snapshot.
+Keep staging and production lock buckets separate. Exercise writer, repair, rollback, and alert changes in staging before production. Dry-run a Reporting repair before `--apply`, keep Scheduler jobs paused during a production repair, and require the production proof pack to pass before resuming them. Data API fields still not captured include `description`, language, `liveBroadcastContent`, `topicCategories`, and `caption`. Per-video audience retention curves remain a possible Analytics API extension.

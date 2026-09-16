@@ -65,8 +65,37 @@ for table in video_metadata daily_video_stats daily_video_analytics daily_traffi
 done
 
 echo ""
-echo "Row counts, source vs staging (must match):"
+echo "Copying Reporting tables and ledger so repair tests use the exact production incident rows..."
 FAIL=0
+reporting_tables=$(
+    bq --project_id="$PROJECT_ID" ls --max_results=1000 --format=json "$SRC" |
+        python3 -c 'import json,sys; print("\n".join(sorted(x["tableReference"]["tableId"] for x in json.load(sys.stdin) if x.get("type") == "TABLE" and x["tableReference"]["tableId"].startswith("reporting_"))))'
+)
+reporting_tables_found=$(printf '%s\n' "$reporting_tables" | sed '/^$/d' | wc -l | tr -d ' ')
+reporting_tables_copied=0
+while IFS= read -r table; do
+    [[ -n "$table" ]] || continue
+    echo "Copying $SRC.$table -> $DST.$table"
+    bq --project_id="$PROJECT_ID" cp --force --quiet "$SRC.$table" "$DST.$table"
+    counts=$(bq --project_id="$PROJECT_ID" query --use_legacy_sql=false --format=csv --quiet \
+        "SELECT (SELECT COUNT(*) FROM \`$PROJECT_ID.$SRC.$table\`) AS src, (SELECT COUNT(*) FROM \`$PROJECT_ID.$DST.$table\`) AS staging" | tail -1)
+    src_rows="${counts%%,*}"; dst_rows="${counts##*,}"
+    if [[ "$src_rows" != "$dst_rows" ]]; then
+        echo "  FAIL  $table  src=$src_rows staging=$dst_rows" >&2
+        FAIL=1
+    fi
+    ((reporting_tables_copied += 1))
+done <<< "$reporting_tables"
+if [[ "$reporting_tables_found" -eq 0 || "$reporting_tables_copied" -ne "$reporting_tables_found" ]]; then
+    echo "FAIL: discovered $reporting_tables_found Reporting tables but copied $reporting_tables_copied" >&2
+    FAIL=1
+fi
+
+echo ""
+GCP_PROJECT="$PROJECT_ID" BQ_DATASET="$DST" GCP_REGION="$LOCATION" bash "$SCRIPT_DIR/10_create_views.sh" >/dev/null
+
+echo ""
+echo "Row counts, source vs staging (must match):"
 for table in video_metadata daily_video_stats daily_video_analytics daily_traffic_sources; do
     line=$(bq --project_id="$PROJECT_ID" query --use_legacy_sql=false --format=csv --quiet \
         "SELECT (SELECT COUNT(*) FROM \`$PROJECT_ID.$SRC.$table\`) AS src, (SELECT COUNT(*) FROM \`$PROJECT_ID.$DST.$table\`) AS staging" | tail -1)

@@ -29,7 +29,8 @@ set -euo pipefail
 #      REFRESH_TIMEOUT (required), ANALYTICS_LOOKBACK_DAYS (required),
 #      REFRESH_TRAILING_DAYS (default 30), REFRESH_MIN_ROW_RATIO (default 0.5 — see
 #      analytics_refresh.py's DEFAULT_MIN_ROW_RATIO docstring; needs Kyle's sign-off
-#      before trusting it in prod).
+#      before trusting it in prod), PIPELINE_LOCK_BUCKET (required and environment-specific),
+#      RUN_LEASE_TTL_SECONDS (default 2100).
 
 PROJECT_ID="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 : "${PROJECT_ID:?no GCP project: set GCP_PROJECT or gcloud config set project}"
@@ -43,6 +44,8 @@ BQ_DATASET="${BQ_DATASET:-$PROD_DATASET}"
 : "${ANALYTICS_LOOKBACK_DAYS:?set ANALYTICS_LOOKBACK_DAYS to match the value the daily function is deployed with (check setup/4_deploy_function.sh or the live function env), not the code default}"
 REFRESH_TRAILING_DAYS="${REFRESH_TRAILING_DAYS:-30}"
 REFRESH_MIN_ROW_RATIO="${REFRESH_MIN_ROW_RATIO:-0.5}"
+RUN_LEASE_TTL_SECONDS="${RUN_LEASE_TTL_SECONDS:-2100}"
+: "${PIPELINE_LOCK_BUCKET:?set PIPELINE_LOCK_BUCKET to the environment-specific writer-lock bucket}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -54,6 +57,9 @@ fi
 if [[ "$FUNCTION_NAME" != "$PROD_FUNCTION" && "$BQ_DATASET" == "$PROD_DATASET" ]]; then
     echo "Refusing: a non-production function ($FUNCTION_NAME) pointed at the production dataset." >&2; exit 1
 fi
+source "$SCRIPT_DIR/deploy_safety.sh"
+validate_writer_deploy "$FUNCTION_NAME" "$BQ_DATASET" "$PIPELINE_LOCK_BUCKET" \
+    "$PROJECT_ID" "$REFRESH_TIMEOUT" "$RUN_LEASE_TTL_SECONDS"
 
 echo "Deploying Cloud Function: $FUNCTION_NAME"
 echo "  Project: $PROJECT_ID   Region: $REGION"
@@ -70,8 +76,11 @@ gcloud functions deploy "$FUNCTION_NAME" \
     --trigger-http \
     --no-allow-unauthenticated \
     --memory=512MB \
+    --cpu=1 \
     --timeout="$REFRESH_TIMEOUT" \
-    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=$BQ_DATASET,ANALYTICS_LOOKBACK_DAYS=$ANALYTICS_LOOKBACK_DAYS,REFRESH_TRAILING_DAYS=$REFRESH_TRAILING_DAYS,REFRESH_MIN_ROW_RATIO=$REFRESH_MIN_ROW_RATIO" \
+    --max-instances=1 \
+    --concurrency=2 \
+    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=$BQ_DATASET,ANALYTICS_LOOKBACK_DAYS=$ANALYTICS_LOOKBACK_DAYS,REFRESH_TRAILING_DAYS=$REFRESH_TRAILING_DAYS,REFRESH_MIN_ROW_RATIO=$REFRESH_MIN_ROW_RATIO,PIPELINE_LOCK_BUCKET=$PIPELINE_LOCK_BUCKET,RUN_LEASE_TTL_SECONDS=$RUN_LEASE_TTL_SECONDS" \
     --project="$PROJECT_ID"
 # No YOUTUBE_API_KEY secret binding: this function never touches the Data API. Video IDs
 # come from the latest video_metadata snapshot in BigQuery, and the Analytics API uses

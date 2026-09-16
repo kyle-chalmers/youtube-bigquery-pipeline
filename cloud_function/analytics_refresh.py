@@ -3,33 +3,17 @@
 YouTube revises Analytics numbers (e.g. invalid-traffic removal) for up to ~30 days
 after the fact. The Reporting API pipeline (reporting_loader.py) already picks these
 revisions up automatically by diffing report createTime. The Analytics API tables this
-module refreshes (daily_video_analytics, daily_traffic_sources) have no equivalent —
+module refreshes (daily_video_analytics, daily_traffic_sources) have no equivalent.
 once an activity_date is loaded by the daily cron, it is never re-read. This module is
 the fix: re-fetch and overwrite the trailing window on a schedule (see refresh_main.py).
 
-SOFT-GUARD INVARIANT — read before changing either this module's schedule or
-cloud_function/main.py's gap-repair schedule:
-
-This module assumes it never runs concurrently with the daily function's
-`_repair_gaps` (main.py). Both write via DELETE+INSERT to the same activity_date
-partitions on daily_video_analytics/daily_traffic_sources, and their windows overlap by
-design (gap repair covers roughly the last GAP_LOOKBACK_DAYS before the daily lookback
-boundary; this refresh covers a trailing window ending at the same boundary). If the two
-ever executed against the same partition at the same time, the result could be
-duplicated rows.
-
-There is deliberately no code-level lock here — Kyle's call, to keep the architecture
-simple for a residual risk this cheap to detect. Safety comes entirely from:
-  1. Scheduling this job far from the daily 00:10 America/Phoenix run (weekly, e.g.
-     Sunday 03:00 Phoenix — see the scheduler invocation in setup/12_deploy_refresh_function.sh).
-  2. MAX_RETRY_ATTEMPTS=0 on this job's Cloud Scheduler entry (setup/5_create_scheduler.sh),
-     so a slow run that misses its attempt deadline does NOT get retried into a second,
-     overlapping invocation — Cloud Run does not cancel the first one just because
-     Scheduler gave up waiting on it.
-Anyone changing either schedule must re-verify the separation holds. A violation would
-show up as duplicate (activity_date, video_id) rows in daily_video_analytics or
-daily_traffic_sources — see the duplicate-row check in the Phase 4 refresh plan's
-verification SQL.
+Both this module and `main.py` can write overlapping activity-date partitions. Every
+entry point therefore acquires the same dataset-scoped `analytics-writer` GCS lease, and
+every replacement transaction updates the dataset's analytics mutex before deleting or
+inserting rows. The lease prevents overlapping application runs. The mutex is the final
+BigQuery guard if another caller reaches the transaction directly. Scheduler separation
+and zero retries on this refresh remain useful load controls, but correctness no longer
+depends on schedule timing.
 """
 
 from __future__ import annotations
@@ -51,7 +35,7 @@ INCOMPLETE_LOG = "refresh_incomplete"
 # Refuse a replacement if the freshly fetched row count is below this fraction of what's
 # currently in the partition. Guards against the documented single-metric-zeroing
 # failure mode and the 200-row cap/shard logic both returning fewer rows than expected
-# with an empty error list — refusing only on non-empty fetch errors would miss this.
+# with an empty error list. Refusing only on non-empty fetch errors would miss this.
 # NEEDS KYLE'S SIGN-OFF: this number is a proposal, not a validated business rule.
 # Override via REFRESH_MIN_ROW_RATIO in refresh_main.py before trusting it in prod.
 DEFAULT_MIN_ROW_RATIO = 0.5
@@ -62,8 +46,8 @@ def compute_refresh_window(
 ) -> tuple[date, date]:
     """Inclusive (start, end) activity-date window to refresh.
 
-    Ends `lookback_days` before run_date — the same freshness boundary the daily
-    function trusts (its ANALYTICS_LOOKBACK_DAYS) — so this never re-queries the
+    Ends `lookback_days` before run_date, which is the same freshness boundary the daily
+    function trusts (its ANALYTICS_LOOKBACK_DAYS). This never re-queries the
     availability dead zone that's empty because YouTube hasn't published it yet, not
     because it needs revising. `lookback_days` has no default here: it's always passed
     in from whatever the daily function is actually deployed with (see refresh_main.py's
@@ -90,13 +74,13 @@ def refresh_trailing_days(
 
     Args:
         video_ids: The current video universe (from the latest video_metadata
-            snapshot — see refresh_main.py). A video no longer in that snapshot (fully
+            snapshot; see refresh_main.py). A video no longer in that snapshot (fully
             removed from the channel) silently drops out of refresh coverage even
             though its historical rows still exist; this matches the existing
             setup/backfill_analytics.py behavior.
         analytics_api: A YouTubeAnalyticsAPI instance (or test double) exposing
             get_video_analytics(video_ids, date) and
-            get_traffic_sources_range(video_ids, start_date, end_date) — NOT
+            get_traffic_sources_range(video_ids, start_date, end_date), not
             get_traffic_sources, which is one call per video per day and does not scale
             to a 30-day window (measured live at ~30 minutes for this channel's 204
             videos, versus under a second for the range call). See

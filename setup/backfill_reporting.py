@@ -41,6 +41,7 @@ import _bootstrap  # noqa: F401  (adds cloud_function/ to sys.path)
 from partition_replacer import StagedTransactionalReplacer
 from report_specs import LEDGER_TABLE, SPECS
 from reporting_loader import GcsArchive, IngestLedger, ReportingLoader
+from run_lease import manual_writer_lease
 from youtube_reporting_api import ReportRef
 
 
@@ -112,6 +113,10 @@ def empty_replace_script(dataset_ref: str, table: str) -> str:
 BEGIN
   DECLARE removed INT64;
   BEGIN TRANSACTION;
+  UPDATE `{dataset_ref}.pipeline_write_mutex_reporting`
+  SET touched_at = CURRENT_TIMESTAMP()
+  WHERE mutex_name = 'reporting';
+  ASSERT @@row_count = 1 AS 'refused: reporting pipeline write mutex must contain exactly one row';
   IF NOT EXISTS (SELECT 1 FROM {ledger} WHERE report_id = @report_id AND report_type = @report_type
                  AND report_date = @report_date AND status = 'header_only_conflict') THEN
     RAISE USING MESSAGE = 'refused: no header_only_conflict ledger row for that report id, type and date';
@@ -155,8 +160,9 @@ def main() -> int:
     load_source = args.load_source or f"backfill_{datetime.now(timezone.utc):%Y%m%d}"
     bucket_name = os.environ.get("REPORTING_ARCHIVE_BUCKET", f"{project}-youtube-reporting-raw")
 
-    bq = bigquery.Client(project=project)
-    bucket = storage.Client(project=project).bucket(bucket_name)
+    credentials = _bootstrap.google_cloud_credentials()
+    bq = bigquery.Client(project=project, credentials=credentials)
+    bucket = storage.Client(project=project, credentials=credentials).bucket(bucket_name)
     ledger = IngestLedger(bq, dataset_ref)
 
     if args.allow_empty_replace:
@@ -178,7 +184,13 @@ def main() -> int:
             bigquery.ScalarQueryParameter("report_date", "DATE", args.report_date),
             bigquery.ScalarQueryParameter("load_source", "STRING", f"{load_source}_empty_replace"),
         ])
-        result = list(bq.query(empty_replace_script(dataset_ref, spec.table), job_config=cfg).result())
+        with manual_writer_lease(
+            project_id=project,
+            dataset=args.dataset,
+            domain="reporting-writer",
+            entrypoint="backfill_reporting",
+        ):
+            result = list(bq.query(empty_replace_script(dataset_ref, spec.table), job_config=cfg).result())
         removed = result[0]["rows_removed"] if result else "?"
         print(f"removed {removed} rows from {spec.table} {args.report_date}; ledger: loaded -> superseded, "
               f"{args.report_id} -> header_only, load_source={load_source}_empty_replace")
@@ -225,7 +237,14 @@ def main() -> int:
         loader = ReportingLoader(client, StagedTransactionalReplacer(bq, dataset_ref, channel_id), ledger,
                                  dataset_ref, GcsArchive(bucket), max_reports_per_run=args.max,
                                  load_source=load_source, specs=specs)
-    summary = loader.run()
+    with manual_writer_lease(
+        project_id=project,
+        dataset=args.dataset,
+        domain="reporting-writer",
+        entrypoint="backfill_reporting",
+        dry_run=args.dry_run,
+    ):
+        summary = loader.run()
     print(summary.as_dict())
     return 1 if (summary.failed or summary.header_only_conflict) else 0
 

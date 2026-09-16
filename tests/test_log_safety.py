@@ -40,6 +40,8 @@ def test_redact_leaves_plain_text_alone():
 
 
 def test_pipeline_failure_log_carries_no_api_key(monkeypatch, caplog):
+    from contextlib import nullcontext
+
     class Boom:
         def __init__(self, *a, **k):
             pass
@@ -49,6 +51,7 @@ def test_pipeline_failure_log_carries_no_api_key(monkeypatch, caplog):
 
     monkeypatch.setattr(main, "YouTubeDataAPI", Boom)
     monkeypatch.setattr(main, "BigQueryWriter", lambda **k: None)
+    monkeypatch.setattr(main, "build_run_lease", lambda **kwargs: nullcontext())
     monkeypatch.setenv("YOUTUBE_API_KEY", "AIzaSECRETVALUE123")
 
     class Req:

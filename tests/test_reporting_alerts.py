@@ -3,12 +3,14 @@ the exact string the code emits. Rewording one side silently disables an alert."
 
 import logging
 import re
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 
 import reporting_loader
 import reporting_main
+import run_lease
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = (ROOT / "setup" / "6_setup_monitoring.sh").read_text()
@@ -32,9 +34,19 @@ def test_monitoring_script_matches_the_strings_the_code_emits():
         reporting_loader.HEADER_ONLY_CONFLICT_LOG,
         reporting_main.STALE_LOG,
         reporting_main.SKIPPED_LOG,
+        reporting_loader.BUDGET_DEFERRED_LOG,
+        reporting_loader.CONCURRENCY_DEFERRED_LOG,
+        run_lease.LEASE_EXPIRED_LOG,
+        run_lease.LEASE_RELEASE_FAILED_LOG,
     }
     pipeline = matched_strings("FUNCTION_NAME")
-    assert pipeline == {"Analytics API failed entirely", "Wrote daily_video_analytics — 0 rows", "Pipeline failed"}
+    assert pipeline == {
+        "Analytics API failed entirely",
+        "Wrote daily_video_analytics — 0 rows",
+        "Pipeline failed",
+        run_lease.LEASE_EXPIRED_LOG,
+        run_lease.LEASE_RELEASE_FAILED_LOG,
+    }
 
 
 def test_reporting_main_emits_the_alert_strings(monkeypatch, caplog):
@@ -86,15 +98,22 @@ def test_reporting_main_is_stale_when_nothing_loaded(monkeypatch, caplog):
 
 def test_reporting_main_failed_entirely_string_and_500(monkeypatch, caplog):
     monkeypatch.setattr(reporting_main, "REPORTING_ENABLED", True)
+    monkeypatch.setattr(reporting_main, "build_run_lease", lambda **kwargs: nullcontext())
 
-    def boom(log):
-        raise RuntimeError("invalid_grant")
+    def boom(log, work_deadline, run_id=None):
+        assert run_id
+        raise RuntimeError("invalid_grant?access_token=private-value")
 
     monkeypatch.setattr(reporting_main, "run_reporting", boom)
     with caplog.at_level(logging.INFO):
         body, status = reporting_main.reporting_main(request=None)
-    assert status == 500 and body["error"] == "invalid_grant"
-    assert any(r.getMessage().startswith(reporting_main.FAILED_LOG + ": invalid_grant") for r in caplog.records)
+    assert status == 500 and body["error"] == "invalid_grant?access_token=<redacted>"
+    assert any(
+        r.getMessage().startswith(reporting_main.FAILED_LOG + ": invalid_grant?access_token=<redacted>")
+        for r in caplog.records
+    )
+    assert "private-value" not in str(body)
+    assert all("private-value" not in r.getMessage() for r in caplog.records)
 
 
 def test_reporting_main_kill_switch_is_a_noop(monkeypatch, caplog):

@@ -20,16 +20,16 @@ REGION="${GCP_REGION:-us-central1}"
 # Twice a day because each report takes about 15 s to load transactionally and a run is
 # capped at MAX_REPORTS_PER_RUN; two runs give headroom for 19 jobs plus regenerations.
 #
-# The Analytics refresh job gets its own job weekly, deliberately far from the 00:10
-# daily run (see the soft-guard invariant documented at the top of
-# cloud_function/analytics_refresh.py — this schedule separation is the only thing that
-# keeps it from racing the daily function's gap repair on the same BigQuery partitions):
+# The Analytics refresh job runs weekly, away from the 00:10 daily run. Both writers
+# share the analytics lease and BigQuery mutex, so schedule separation is a load-control
+# measure rather than the correctness boundary:
 #   FUNCTION_NAME=youtube-analytics-refresh JOB_NAME=youtube-analytics-refresh-weekly \
 #   SCHEDULE="0 3 * * 0" ATTEMPT_DEADLINE=1800s MAX_RETRY_ATTEMPTS=0 bash setup/5_create_scheduler.sh
 # MAX_RETRY_ATTEMPTS=0 is load-bearing, not a stylistic choice: Cloud Run does not cancel
 # a still-running invocation just because Scheduler gave up waiting on it, so a retry
 # after a slow refresh run would start a second run against the same partitions the first
-# one is still writing to. ATTEMPT_DEADLINE must be set to at least the refresh
+# one is still writing to. The lease rejects that overlap, but the retry would add noise.
+# ATTEMPT_DEADLINE must be set to at least the refresh
 # function's own deployed --timeout, or Scheduler gives up (and, if retries were nonzero,
 # would retry) before a legitimately long run finishes.
 FUNCTION_NAME="${FUNCTION_NAME:-youtube-bigquery-pipeline}"
@@ -38,8 +38,16 @@ JOB_NAME="${JOB_NAME:-youtube-daily-snapshot}"
 # midnight, 00:00 Phoenix); at 23:50 it was the last consumer and starved when another tool in
 # the project spent the quota (2026-08-14).
 SCHEDULE="${SCHEDULE:-10 0 * * *}"
-ATTEMPT_DEADLINE="${ATTEMPT_DEADLINE:-600s}"
-MAX_RETRY_ATTEMPTS="${MAX_RETRY_ATTEMPTS:-3}"
+if [[ "$JOB_NAME" == *"reporting-daily"* ]]; then
+    ATTEMPT_DEADLINE="${ATTEMPT_DEADLINE:-1800s}"
+    MAX_RETRY_ATTEMPTS="${MAX_RETRY_ATTEMPTS:-0}"
+elif [[ "$JOB_NAME" == *"analytics-refresh"* ]]; then
+    ATTEMPT_DEADLINE="${ATTEMPT_DEADLINE:-1500s}"
+    MAX_RETRY_ATTEMPTS="${MAX_RETRY_ATTEMPTS:-0}"
+else
+    ATTEMPT_DEADLINE="${ATTEMPT_DEADLINE:-600s}"
+    MAX_RETRY_ATTEMPTS="${MAX_RETRY_ATTEMPTS:-3}"
+fi
 
 # Get the Cloud Function URL
 echo "Looking up Cloud Function URL..."
