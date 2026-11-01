@@ -120,7 +120,7 @@ Cost is not a deciding factor for any option, since every option stays at a few 
 
 **Re-measure trigger:** after the 2026-12-27 run, which brings the count to about 15 steady-state runs including a month end and holiday traffic, re-run the appendix queries. Shorten to `REFRESH_TRAILING_DAYS=25` if no change in minutes, views or subscribers appears past age 16 and no AVD change appears past age 24. Otherwise keep 35.
 
-**Related fix (separate change):** the "~30 days" sentence in the `analytics_refresh.py` docstring and in CLAUDE.md should say the window comes from measurement, and point to this document, so the unsourced claim stops spreading.
+**Related fix (made in the same PR):** the "~30 days" sentence in the `analytics_refresh.py` docstring and the matching DDL comment in `sql/create_tables.sql` now say that YouTube documents no revision limit and point here. CLAUDE.md records the measured cutoffs and the re-measure date.
 
 ## Appendix: queries
 

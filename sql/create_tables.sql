@@ -88,8 +88,8 @@ OPTIONS (
 -- Trailing-30-day Analytics refresh archive tables (Phase 4 hardening).
 -- Populated by BigQueryWriter.archive_and_replace immediately before the refresh job
 -- overwrites a day's rows, so the pre-refresh values are recoverable for a before/after
--- diff (BigQuery time travel alone does not reach back the up-to-30-day window YouTube
--- can revise). Append-only: one row per (activity_date, video_id[, traffic_source_type])
+-- diff (BigQuery time travel alone does not reach back across the 35-day refresh window;
+-- see docs/refresh-window-review-2026-10.md for how far revisions actually reach). Append-only: one row per (activity_date, video_id[, traffic_source_type])
 -- per refresh run that actually touched that day. partition_expiration_days is set at
 -- creation rather than added later, so nothing has to be remembered to prune it.
 CREATE TABLE IF NOT EXISTS `${BQ_DATASET}.daily_video_analytics_refresh_archive` (

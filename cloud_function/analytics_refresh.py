@@ -1,7 +1,10 @@
 """Trailing-N-day Analytics API refresh.
 
-YouTube revises Analytics numbers (e.g. invalid-traffic removal) for up to ~30 days
-after the fact. The Reporting API pipeline (reporting_loader.py) already picks these
+YouTube revises Analytics numbers after the fact (e.g. invalid-traffic removal) and
+documents no limit on how late. The 6-to-35-day window is an empirical choice: across
+the refreshes measured in docs/refresh-window-review-2026-10.md,
+minutes, views and subscribers never changed past day 16 and AVD never past day 24.
+The Reporting API pipeline (reporting_loader.py) already picks these
 revisions up automatically by diffing report createTime. The Analytics API tables this
 module refreshes (daily_video_analytics, daily_traffic_sources) have no equivalent.
 once an activity_date is loaded by the daily cron, it is never re-read. This module is
