@@ -78,7 +78,7 @@ Each script is idempotent. Run them in this order; the reasons are in the adopti
 | 8 | Deploy all three writers to staging | Set each staging function name, `BQ_DATASET=youtube_analytics_staging`, and the staging lock bucket. The deploy scripts refuse production and staging crosses |
 | 9 | `PIPELINE_LOCK_BUCKET=... bash setup/4_deploy_function.sh` | Deploys the daily function with staged transactional writes, one maximum instance, and the Analytics writer lease |
 | 10 | `REPORTING_ENABLED=false PIPELINE_LOCK_BUCKET=... bash setup/9_deploy_reporting_function.sh`, backfill, then deploy with `REPORTING_ENABLED=true` | Deploys Reporting with a 1,500-second timeout, 1,200-second work budget, one maximum instance, and the Reporting writer lease. Production requires an explicit kill-switch value |
-| 11 | `REFRESH_TIMEOUT=... ANALYTICS_LOOKBACK_DAYS=... PIPELINE_LOCK_BUCKET=... bash setup/12_deploy_refresh_function.sh` | Time a real staging run first. The refresh uses the Analytics writer lease and the same transactional partition replacement as the daily writer |
+| 11 | `REFRESH_TIMEOUT=... ANALYTICS_LOOKBACK_DAYS=... PIPELINE_LOCK_BUCKET=... bash setup/12_deploy_refresh_function.sh` | Time a real staging run first. The refresh uses the Analytics writer lease and the same transactional partition replacement as the daily writer. Optional, production only: add `GITHUB_DISPATCH_REPO=owner/repo` to notify a downstream GitHub workflow after each clean refresh (see below) |
 | 12 | `bash setup/5_create_scheduler.sh` for each function; `ALERT_EMAIL=... bash setup/6_setup_monitoring.sh` | Configure explicit job IDs, deadlines, retry policies, target services, and `ERROR` alert severity. Reporting uses a 1,800-second Scheduler deadline and zero retries |
 | 13 | `BQ_DATASET=youtube_analytics bash setup/10_create_views.sh` | Creates the twelve views; views hold no data |
 
@@ -249,3 +249,18 @@ docs/
 ## Maintenance notes
 
 Keep staging and production lock buckets separate. Exercise writer, repair, rollback, and alert changes in staging before production. Dry-run a Reporting repair before `--apply`, keep Scheduler jobs paused during a production repair, and require the production proof pack to pass before resuming them. Data API fields still not captured include `description`, language, `liveBroadcastContent`, `topicCategories`, and `caption`. Per-video audience retention curves remain a possible Analytics API extension.
+
+## Notify a downstream workflow after the weekly refresh (optional)
+
+The refresh function can send one GitHub `repository_dispatch` event of type `youtube-refresh-complete` when a refresh finishes with no failed days, so a downstream workflow (for example a dbt metric canary) runs on fresh data instead of waiting for its own cron. It is best effort: a failed dispatch logs `GitHub dispatch failed` as a warning and the refresh still succeeds.
+
+1. Create a fine-grained personal access token limited to the downstream repository, with **Contents: write** only (the minimum GitHub lists for `POST /repos/{owner}/{repo}/dispatches`). Give it an expiry and a calendar reminder.
+2. Store it in Secret Manager without it touching your shell history, and let the function's service account read it:
+   ```bash
+   gcloud secrets create github-dispatch-token --replication-policy=automatic --data-file=-   # paste the token, then Ctrl-D
+   gcloud secrets add-iam-policy-binding github-dispatch-token \
+     --member="serviceAccount:$(gcloud functions describe youtube-analytics-refresh --region=us-central1 --gen2 --format='value(serviceConfig.serviceAccountEmail)')" \
+     --role=roles/secretmanager.secretAccessor
+   ```
+3. Redeploy the production refresh function with `GITHUB_DISPATCH_REPO=owner/repo` added to step 11's command. The deploy script refuses it for a staging function.
+

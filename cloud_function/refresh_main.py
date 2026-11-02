@@ -33,6 +33,7 @@ except Exception:  # noqa: BLE001 - local runs have no Cloud Logging
 
 from analytics_refresh import DEFAULT_MIN_ROW_RATIO, INCOMPLETE_LOG, refresh_trailing_days
 from bigquery_writer import BigQueryWriter
+from github_dispatch import notify_refresh_complete
 from log_safety import redact
 from run_lease import (
     LEASE_EXPIRED_LOG,
@@ -116,6 +117,22 @@ def run_refresh(run_date, refresh_run_id: str, log: logging.LoggerAdapter) -> di
     return {"outcomes": outcomes, "counts": counts}
 
 
+def _notify_downstream(result: dict, run_id: str, log: logging.LoggerAdapter) -> None:
+    """Dispatch to GitHub after a refresh that wrote every day it tried. Never raises.
+
+    A run with skipped_error days is not a clean refresh, so downstream checks wait for
+    their own fallback schedule instead of running on a partly refreshed window.
+    """
+    errors = result.get("counts", {}).get("skipped_error", 0)
+    if errors:
+        log.info(f"GitHub dispatch skipped: {errors} day(s) failed to refresh")
+        return
+    try:
+        notify_refresh_complete(run_id, log)
+    except Exception as e:  # noqa: BLE001 - the refresh already succeeded; never fail it here
+        log.warning(f"GitHub dispatch failed: unexpected {type(e).__name__}: {redact(str(e))}")
+
+
 @functions_framework.http
 def refresh_main(request) -> tuple[dict, int]:
     run_id = str(uuid.uuid4())[:8]
@@ -132,6 +149,7 @@ def refresh_main(request) -> tuple[dict, int]:
             result = run_refresh(run_date, run_id, log)
         log.info(f"Analytics refresh handler complete — run_id={run_id}")
         result["run_id"] = run_id
+        _notify_downstream(result, run_id, log)
         return result, 200
     except LeaseHeld as e:
         log.warning(f"{LEASE_HELD_LOG}: analytics-writer owner={e.record.owner}")

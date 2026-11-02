@@ -30,7 +30,10 @@ set -euo pipefail
 #      REFRESH_TRAILING_DAYS (default 30), REFRESH_MIN_ROW_RATIO (default 0.5 — see
 #      analytics_refresh.py's DEFAULT_MIN_ROW_RATIO docstring; needs Kyle's sign-off
 #      before trusting it in prod), PIPELINE_LOCK_BUCKET (required and environment-specific),
-#      RUN_LEASE_TTL_SECONDS (default 2100).
+#      RUN_LEASE_TTL_SECONDS (default 2100), GITHUB_DISPATCH_REPO (optional, production
+#      only: owner/repo to notify with a repository_dispatch after a clean refresh, see
+#      cloud_function/github_dispatch.py; binds the token from the Secret Manager secret
+#      named by GITHUB_DISPATCH_SECRET, default github-dispatch-token).
 
 PROJECT_ID="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 : "${PROJECT_ID:?no GCP project: set GCP_PROJECT or gcloud config set project}"
@@ -57,6 +60,19 @@ fi
 if [[ "$FUNCTION_NAME" != "$PROD_FUNCTION" && "$BQ_DATASET" == "$PROD_DATASET" ]]; then
     echo "Refusing: a non-production function ($FUNCTION_NAME) pointed at the production dataset." >&2; exit 1
 fi
+# Downstream notification is production-only: a staging refresh must never trigger the
+# downstream repo's production workflow.
+GITHUB_DISPATCH_REPO="${GITHUB_DISPATCH_REPO:-}"
+GITHUB_DISPATCH_SECRET="${GITHUB_DISPATCH_SECRET:-github-dispatch-token}"
+SECRET_ARGS=()
+DISPATCH_ENV=""
+if [[ -n "$GITHUB_DISPATCH_REPO" ]]; then
+    if [[ "$FUNCTION_NAME" != "$PROD_FUNCTION" ]]; then
+        echo "Refusing: GITHUB_DISPATCH_REPO is production-only; unset it for $FUNCTION_NAME." >&2; exit 1
+    fi
+    SECRET_ARGS=(--set-secrets="GITHUB_DISPATCH_TOKEN=${GITHUB_DISPATCH_SECRET}:latest")
+    DISPATCH_ENV=",GITHUB_DISPATCH_REPO=$GITHUB_DISPATCH_REPO"
+fi
 source "$SCRIPT_DIR/deploy_safety.sh"
 validate_writer_deploy "$FUNCTION_NAME" "$BQ_DATASET" "$PIPELINE_LOCK_BUCKET" \
     "$PROJECT_ID" "$REFRESH_TIMEOUT" "$RUN_LEASE_TTL_SECONDS"
@@ -64,6 +80,7 @@ validate_writer_deploy "$FUNCTION_NAME" "$BQ_DATASET" "$PIPELINE_LOCK_BUCKET" \
 echo "Deploying Cloud Function: $FUNCTION_NAME"
 echo "  Project: $PROJECT_ID   Region: $REGION"
 echo "  Dataset: $BQ_DATASET   Timeout: $REFRESH_TIMEOUT   Lookback: $ANALYTICS_LOOKBACK_DAYS   Trailing days: $REFRESH_TRAILING_DAYS"
+echo "  GitHub dispatch: ${GITHUB_DISPATCH_REPO:-off}"
 echo ""
 
 gcloud functions deploy "$FUNCTION_NAME" \
@@ -80,7 +97,8 @@ gcloud functions deploy "$FUNCTION_NAME" \
     --timeout="$REFRESH_TIMEOUT" \
     --max-instances=1 \
     --concurrency=2 \
-    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=$BQ_DATASET,ANALYTICS_LOOKBACK_DAYS=$ANALYTICS_LOOKBACK_DAYS,REFRESH_TRAILING_DAYS=$REFRESH_TRAILING_DAYS,REFRESH_MIN_ROW_RATIO=$REFRESH_MIN_ROW_RATIO,PIPELINE_LOCK_BUCKET=$PIPELINE_LOCK_BUCKET,RUN_LEASE_TTL_SECONDS=$RUN_LEASE_TTL_SECONDS" \
+    --set-env-vars="GCP_PROJECT=$PROJECT_ID,BQ_DATASET=$BQ_DATASET,ANALYTICS_LOOKBACK_DAYS=$ANALYTICS_LOOKBACK_DAYS,REFRESH_TRAILING_DAYS=$REFRESH_TRAILING_DAYS,REFRESH_MIN_ROW_RATIO=$REFRESH_MIN_ROW_RATIO,PIPELINE_LOCK_BUCKET=$PIPELINE_LOCK_BUCKET,RUN_LEASE_TTL_SECONDS=$RUN_LEASE_TTL_SECONDS$DISPATCH_ENV" \
+    ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
     --project="$PROJECT_ID"
 # No YOUTUBE_API_KEY secret binding: this function never touches the Data API. Video IDs
 # come from the latest video_metadata snapshot in BigQuery, and the Analytics API uses
