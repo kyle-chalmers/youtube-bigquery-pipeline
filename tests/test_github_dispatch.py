@@ -117,9 +117,56 @@ def test_lease_held_does_not_dispatch(monkeypatch):
 def test_dispatch_error_never_changes_the_refresh_result(monkeypatch):
     monkeypatch.setattr(refresh_main, "build_run_lease", lambda **kwargs: nullcontext())
     monkeypatch.setattr(refresh_main, "run_refresh",
-                        lambda run_date, refresh_run_id, log: {"outcomes": {}, "counts": {"skipped_error": 0}})
+                        lambda run_date, refresh_run_id, log: {"outcomes": {}, "counts": {"written": 1, "skipped_error": 0}})
     def explode(run_id, log):
         raise RuntimeError("unexpected")
     monkeypatch.setattr(refresh_main, "notify_refresh_complete", explode)
     body, status = refresh_main.refresh_main(request=None)
     assert status == 200 and "error" not in body
+
+
+def test_low_count_refusals_do_not_dispatch(monkeypatch):
+    body, status, sent = _run_handler(monkeypatch, counts={"written": 28, "skipped_error": 0, "skipped_low_count": 2})
+    assert status == 200 and sent == []
+
+
+def test_refresh_that_wrote_nothing_does_not_dispatch(monkeypatch):
+    body, status, sent = _run_handler(monkeypatch, counts={"written": 0, "skipped_empty": 60})
+    assert status == 200 and sent == []
+
+
+def test_token_and_repo_are_stripped():
+    post = Recorder()
+    github_dispatch.notify_refresh_complete("r1", log(), repo=" owner/repo\n", token=TOKEN + "\n", post=post)
+    url, kwargs = post.calls[0]
+    assert url == "https://api.github.com/repos/owner/repo/dispatches"
+    assert kwargs["headers"]["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_partial_configuration_warns(caplog):
+    post = Recorder()
+    with caplog.at_level(logging.INFO):
+        assert github_dispatch.notify_refresh_complete("r1", log(), repo="owner/repo", token="", post=post) is False
+    assert post.calls == []
+    assert any(r.levelno == logging.WARNING and r.getMessage().startswith(github_dispatch.FAILED_LOG)
+               for r in caplog.records)
+
+
+def test_user_agent_is_sent():
+    post = Recorder()
+    github_dispatch.notify_refresh_complete("r1", log(), repo="owner/repo", token=TOKEN, post=post)
+    assert post.calls[0][1]["headers"]["User-Agent"] == "youtube-bigquery-pipeline"
+
+
+def test_unexpected_error_never_logs_the_token(monkeypatch, caplog):
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", TOKEN)
+    monkeypatch.setattr(refresh_main, "build_run_lease", lambda **kwargs: nullcontext())
+    monkeypatch.setattr(refresh_main, "run_refresh",
+                        lambda run_date, refresh_run_id, log: {"outcomes": {}, "counts": {"written": 1}})
+    def explode(run_id, log):
+        raise RuntimeError(f"header value {TOKEN} invalid")
+    monkeypatch.setattr(refresh_main, "notify_refresh_complete", explode)
+    with caplog.at_level(logging.INFO):
+        body, status = refresh_main.refresh_main(request=None)
+    assert status == 200
+    assert all(TOKEN not in r.getMessage() for r in caplog.records)

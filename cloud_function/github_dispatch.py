@@ -31,7 +31,9 @@ FAILED_LOG = "GitHub dispatch failed"
 NOT_CONFIGURED_LOG = "GitHub dispatch not configured"
 
 
-def _scrub(text: str, token: str) -> str:
+def scrub(text: str, token: str | None = None) -> str:
+    """Redact Google secrets and the GitHub token (from the argument or the environment)."""
+    token = (os.environ.get("GITHUB_DISPATCH_TOKEN", "") if token is None else token).strip()
     return redact(text.replace(token, "[REDACTED]") if token else text)
 
 
@@ -43,10 +45,15 @@ def notify_refresh_complete(
     post: Callable = requests.post,
 ) -> bool:
     """Send the dispatch. Returns True when GitHub accepted it (204), False otherwise."""
-    repo = os.environ.get("GITHUB_DISPATCH_REPO", "") if repo is None else repo
-    token = os.environ.get("GITHUB_DISPATCH_TOKEN", "") if token is None else token
-    if not repo or not token:
+    # Strip: a token pasted into `gcloud secrets create --data-file=-` usually ends in a newline.
+    repo = (os.environ.get("GITHUB_DISPATCH_REPO", "") if repo is None else repo).strip()
+    token = (os.environ.get("GITHUB_DISPATCH_TOKEN", "") if token is None else token).strip()
+    if not repo and not token:
         log.info(f"{NOT_CONFIGURED_LOG}; set GITHUB_DISPATCH_REPO and GITHUB_DISPATCH_TOKEN to enable")
+        return False
+    if not repo or not token:
+        log.warning(f"{FAILED_LOG}: partly configured, GITHUB_DISPATCH_REPO is "
+                    f"{'set' if repo else 'unset'} and GITHUB_DISPATCH_TOKEN is {'set' if token else 'unset'}")
         return False
 
     try:
@@ -56,16 +63,17 @@ def notify_refresh_complete(
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token}",
                 "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "youtube-bigquery-pipeline",
             },
             json={"event_type": EVENT_TYPE, "client_payload": {"refresh_run_id": refresh_run_id}},
             timeout=TIMEOUT_SECONDS,
         )
     except requests.RequestException as e:
-        log.warning(f"{FAILED_LOG}: {type(e).__name__}: {_scrub(str(e), token)}")
+        log.warning(f"{FAILED_LOG}: {type(e).__name__}: {scrub(str(e), token)}")
         return False
 
     if response.status_code != 204:
-        log.warning(f"{FAILED_LOG}: HTTP {response.status_code}: {_scrub(response.text[:300], token)}")
+        log.warning(f"{FAILED_LOG}: HTTP {response.status_code}: {scrub(response.text[:300], token)}")
         return False
     log.info(f"{SENT_LOG}: repo={repo} event_type={EVENT_TYPE}")
     return True

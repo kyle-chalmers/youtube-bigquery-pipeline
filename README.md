@@ -252,7 +252,7 @@ Keep staging and production lock buckets separate. Exercise writer, repair, roll
 
 ## Notify a downstream workflow after the weekly refresh (optional)
 
-The refresh function can send one GitHub `repository_dispatch` event of type `youtube-refresh-complete` when a refresh finishes with no failed days, so a downstream workflow (for example a dbt metric canary) runs on fresh data instead of waiting for its own cron. It is best effort: a failed dispatch logs `GitHub dispatch failed` as a warning and the refresh still succeeds.
+The refresh function can send one GitHub `repository_dispatch` event of type `youtube-refresh-complete` when a refresh finishes clean (no failed or refused days, at least one day written), so a downstream workflow (for example a dbt metric canary) runs on fresh data instead of waiting for its own cron. It is best effort: a failed dispatch logs `GitHub dispatch failed` as a warning and the refresh still succeeds.
 
 1. Create a fine-grained personal access token limited to the downstream repository, with **Contents: write** only (the minimum GitHub lists for `POST /repos/{owner}/{repo}/dispatches`). Give it an expiry and a calendar reminder.
 2. Store it in Secret Manager without it touching your shell history, and let the function's service account read it:

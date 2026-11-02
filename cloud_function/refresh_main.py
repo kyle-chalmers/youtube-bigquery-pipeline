@@ -33,7 +33,7 @@ except Exception:  # noqa: BLE001 - local runs have no Cloud Logging
 
 from analytics_refresh import DEFAULT_MIN_ROW_RATIO, INCOMPLETE_LOG, refresh_trailing_days
 from bigquery_writer import BigQueryWriter
-from github_dispatch import notify_refresh_complete
+from github_dispatch import notify_refresh_complete, scrub
 from log_safety import redact
 from run_lease import (
     LEASE_EXPIRED_LOG,
@@ -118,19 +118,23 @@ def run_refresh(run_date, refresh_run_id: str, log: logging.LoggerAdapter) -> di
 
 
 def _notify_downstream(result: dict, run_id: str, log: logging.LoggerAdapter) -> None:
-    """Dispatch to GitHub after a refresh that wrote every day it tried. Never raises.
+    """Dispatch to GitHub after a clean refresh. Never raises.
 
-    A run with skipped_error days is not a clean refresh, so downstream checks wait for
+    Clean means no day failed (skipped_error), no replacement was refused by the row-count
+    safeguard (skipped_low_count), and at least one day was written. skipped_empty days are
+    allowed: they include genuine zero-activity days. Otherwise downstream checks wait for
     their own fallback schedule instead of running on a partly refreshed window.
     """
-    errors = result.get("counts", {}).get("skipped_error", 0)
-    if errors:
-        log.info(f"GitHub dispatch skipped: {errors} day(s) failed to refresh")
+    counts = result.get("counts", {})
+    failed = counts.get("skipped_error", 0) + counts.get("skipped_low_count", 0)
+    if failed or not counts.get("written", 0):
+        log.info(f"GitHub dispatch skipped: refresh not clean (written={counts.get('written', 0)}, "
+                 f"skipped_error={counts.get('skipped_error', 0)}, skipped_low_count={counts.get('skipped_low_count', 0)})")
         return
     try:
         notify_refresh_complete(run_id, log)
     except Exception as e:  # noqa: BLE001 - the refresh already succeeded; never fail it here
-        log.warning(f"GitHub dispatch failed: unexpected {type(e).__name__}: {redact(str(e))}")
+        log.warning(f"GitHub dispatch failed: unexpected {type(e).__name__}: {scrub(str(e))}")
 
 
 @functions_framework.http
